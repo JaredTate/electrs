@@ -27,6 +27,8 @@ pub enum Network {
     #[cfg(not(feature = "liquid"))]
     Bitcoin,
     #[cfg(not(feature = "liquid"))]
+    DigiByte,  // Add DigiByte network
+    #[cfg(not(feature = "liquid"))]
     Testnet,
     #[cfg(not(feature = "liquid"))]
     Regtest,
@@ -44,7 +46,10 @@ pub enum Network {
 impl Network {
     #[cfg(not(feature = "liquid"))]
     pub fn magic(self) -> u32 {
-        u32::from_le_bytes(BNetwork::from(self).magic().to_bytes())
+        match self {
+            Network::DigiByte => 0xdab5bffa, // Updated DigiByte mainnet magic
+            _ => u32::from_le_bytes(BNetwork::from(self).magic().to_bytes())
+        }
     }
 
     #[cfg(feature = "liquid")]
@@ -163,6 +168,8 @@ impl From<&str> for Network {
             #[cfg(not(feature = "liquid"))]
             "mainnet" => Network::Bitcoin,
             #[cfg(not(feature = "liquid"))]
+            "digibyte" => Network::DigiByte,
+            #[cfg(not(feature = "liquid"))]
             "testnet" => Network::Testnet,
             #[cfg(not(feature = "liquid"))]
             "regtest" => Network::Regtest,
@@ -189,6 +196,7 @@ impl From<Network> for BNetwork {
             Network::Testnet => BNetwork::Testnet,
             Network::Regtest => BNetwork::Regtest,
             Network::Signet => BNetwork::Signet,
+            _ => panic!("unknown network {:?}", network),
         }
     }
 }

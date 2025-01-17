@@ -277,13 +277,10 @@ impl Config {
         let asset_db_path = m.value_of("asset_db_path").map(PathBuf::from);
 
         let default_daemon_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
+            Network::DigiByte => 14022, // Changed from 14044 to standard DGB RPC port
             Network::Bitcoin => 8332,
-            #[cfg(not(feature = "liquid"))]
             Network::Testnet => 18332,
-            #[cfg(not(feature = "liquid"))]
             Network::Regtest => 18443,
-            #[cfg(not(feature = "liquid"))]
             Network::Signet => 38332,
 
             #[cfg(feature = "liquid")]
@@ -292,13 +289,10 @@ impl Config {
             Network::LiquidTestnet | Network::LiquidRegtest => 7040,
         };
         let default_electrum_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
+            Network::DigiByte => 50002, // Changed to standard DGB Electrum port
             Network::Bitcoin => 50001,
-            #[cfg(not(feature = "liquid"))]
             Network::Testnet => 60001,
-            #[cfg(not(feature = "liquid"))]
             Network::Regtest => 60401,
-            #[cfg(not(feature = "liquid"))]
             Network::Signet => 60601,
 
             #[cfg(feature = "liquid")]
@@ -309,13 +303,10 @@ impl Config {
             Network::LiquidRegtest => 51401,
         };
         let default_http_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
+            Network::DigiByte => 3000,
             Network::Bitcoin => 3000,
-            #[cfg(not(feature = "liquid"))]
             Network::Testnet => 3001,
-            #[cfg(not(feature = "liquid"))]
             Network::Regtest => 3002,
-            #[cfg(not(feature = "liquid"))]
             Network::Signet => 3003,
 
             #[cfg(feature = "liquid")]
@@ -326,13 +317,10 @@ impl Config {
             Network::LiquidRegtest => 3002,
         };
         let default_monitoring_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 4224,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet => 14224,
-            #[cfg(not(feature = "liquid"))]
-            Network::Regtest => 24224,
-            #[cfg(not(feature = "liquid"))]
+            Network::DigiByte => 4224,
+            Network::Bitcoin => 24224,
+            Network::Testnet => 34224,
+            Network::Regtest => 44224,
             Network::Signet => 54224,
 
             #[cfg(feature = "liquid")]
@@ -374,7 +362,10 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let mut default_dir = home_dir().expect("no homedir");
-                default_dir.push(".bitcoin");
+                match network_type {
+                    Network::DigiByte => default_dir.push(".digibyte"),
+                    _ => default_dir.push(".bitcoin"),
+                }
                 default_dir
             });
 
@@ -487,6 +478,7 @@ impl From<&str> for RpcLogging {
 
 pub fn get_network_subdir(network: Network) -> Option<&'static str> {
     match network {
+        Network::DigiByte => None,
         #[cfg(not(feature = "liquid"))]
         Network::Bitcoin => None,
         #[cfg(not(feature = "liquid"))]

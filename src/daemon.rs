@@ -343,12 +343,29 @@ impl Daemon {
         };
         let network_info = daemon.getnetworkinfo()?;
         info!("{:?}", network_info);
-        if network_info.version < 16_00_00 {
-            bail!(
-                "{} is not supported - please use bitcoind 0.16+",
-                network_info.subversion,
-            )
+        
+        // Replace the Bitcoin Core version check with a network-aware check
+        match daemon.network {
+            Network::DigiByte => {
+                // DigiByte version format: 8.22.0 = 82200
+                if network_info.version < 82000 {
+                    bail!(
+                        "{} is not supported - please use DigiByted 8.20.0+",
+                        network_info.subversion,
+                    )
+                }
+            },
+            _ => {
+                // Original Bitcoin Core check
+                if network_info.version < 16_00_00 {
+                    bail!(
+                        "{} is not supported - please use bitcoind 0.16+",
+                        network_info.subversion,
+                    )
+                }
+            }
         }
+        
         let blockchain_info = daemon.getblockchaininfo()?;
         info!("{:?}", blockchain_info);
         if blockchain_info.pruned {
