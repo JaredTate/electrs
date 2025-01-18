@@ -26,7 +26,7 @@ rpcworkqueue=128
 server=1
 txindex=1
 debug=1
-maxconnections=1024
+maxconnections=128
 ```
 
 
