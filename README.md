@@ -1,5 +1,32 @@
 # Esplora - Electrs backend API
 
+Install on Ubuntu Server & make sure you have a digibyted runnng & fully synced in the .digibyte folder as data directory. Change configs as needed.
+
+```bash
+$ sudo apt update
+$ sudo apt install -y rustc cargo
+$ rustc --version
+$ cargo --version
+$ git clone https://github.com/JaredTate/electrs && cd electrs
+$ git checkout new-index
+$ sudo RUST_BACKTRACE=1 cargo run --release --bin electrs -- -vvvv --network digibyte --daemon-dir "/home/digi/.digibyte" --daemon-rpc-addr="127.0.0.1:14044" --cookie="user:password" --cors="*" --http-addr="0.0.0.0:3000" --jsonrpc-import
+```
+
+Example digibyte.conf In .digibyte Folder:
+```bash
+algo=scrypt
+rpcuser=user
+rpcpassword=password
+rpcport=14044
+rpcthreads=16
+rpcworkqueue=128
+server=1
+txindex=1
+debug=1
+maxconnections=1024
+```
+
+
 A block chain index engine and HTTP API written in Rust based on [romanz/electrs](https://github.com/romanz/electrs).
 
 Used as the backend for the [Esplora block explorer](https://github.com/Blockstream/esplora) powering [blockstream.info](https://blockstream.info/).
@@ -11,15 +38,6 @@ Documentation for the database schema and indexing process [is available here](d
 ### Installing & indexing
 
 Install Rust, Bitcoin Core (no `txindex` needed) and the `clang` and `cmake` packages, increase maximum number open files by `ulimit -n 100000` and then:
-
-```bash
-$ git clone https://github.com/blockstream/electrs && cd electrs
-$ git checkout new-index
-$ cargo run --release --bin electrs -- -vvvv --daemon-dir ~/.bitcoin
-
-# Or for liquid:
-$ cargo run --features liquid --release --bin electrs -- -vvvv --network liquid --daemon-dir ~/.liquid
-```
 
 See [electrs's original documentation](https://github.com/romanz/electrs/blob/master/doc/usage.md) for more detailed instructions.
 Note that our indexes are incompatible with electrs's and has to be created separately.
