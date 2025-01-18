@@ -1,9 +1,12 @@
 # Esplora - Electrs backend API
 
-Install on Ubuntu Server & make sure you have a digibyted runnng & fully synced in the .digibyte folder as data directory. Change configs as needed.
+Install on Ubuntu Server v20.04.6 & make sure you have a digibyted runnng & fully synced in the .digibyte folder as data directory. Change configs as needed.
 
 ```bash
 $ sudo apt update
+$ sudo apt install -y libclang-dev
+$ sudo apt install -y clang
+$ sudo apt install -y build-essential cmake pkg-config
 $ sudo apt install -y rustc cargo
 $ rustc --version
 $ cargo --version
