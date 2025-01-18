@@ -193,6 +193,7 @@ impl From<Network> for BNetwork {
     fn from(network: Network) -> Self {
         match network {
             Network::Bitcoin => BNetwork::Bitcoin,
+            Network::DigiByte => BNetwork::Bitcoin, // Use Bitcoin since we can't customize in 0.32.5
             Network::Testnet => BNetwork::Testnet,
             Network::Regtest => BNetwork::Regtest,
             Network::Signet => BNetwork::Signet,

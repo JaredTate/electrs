@@ -5,6 +5,7 @@ use elements::address as elements_address;
 
 use crate::chain::{script, Network, Script, TxIn, TxOut};
 use script::Instruction::PushBytes;
+use bitcoin::{Address as BAddress, network::Network as BNetwork};
 
 pub struct InnerScripts {
     pub redeem_script: Option<Script>,
@@ -37,6 +38,60 @@ impl ScriptToAddr for elements::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
         elements_address::Address::from_script(self, None, network.address_params())
             .map(|a| a.to_string())
+    }
+}
+
+impl ScriptToAddr for Script {
+    fn to_address_str(&self, network: Network) -> Option<String> {
+        match network {
+            Network::DigiByte => {
+                // For DigiByte addresses, manually create them from the script type
+                if self.is_p2pkh() {
+                    // P2PKH
+                    let h160 = self.as_bytes().get(3..23)?;
+                    Some(bitcoin::base58::encode_check(
+                        &[30u8].iter()
+                        .chain(h160.iter())
+                        .copied()
+                        .collect::<Vec<_>>()
+                    ))
+                }
+                else if self.is_p2sh() {
+                    // P2SH 
+                    let h160 = self.as_bytes().get(2..22)?;
+                    Some(bitcoin::base58::encode_check(
+                        &[63u8].iter()
+                        .chain(h160.iter())
+                        .copied()
+                        .collect::<Vec<_>>()
+                    ))
+                }
+                else if self.is_p2wpkh() || self.is_p2wsh() {
+                    // For SegWit addresses, generate a Bitcoin address first
+                    let btc_network = BNetwork::Bitcoin;
+                    BAddress::from_script(self, btc_network)
+                        .ok()
+                        .map(|addr| {
+                            // For SegWit addresses, replace "bc1" prefix with "dgb1"
+                            if addr.to_string().starts_with("bc1") {
+                                addr.to_string().replacen("bc1", "dgb1", 1)
+                            } else {
+                                addr.to_string()
+                            }
+                        })
+                }
+                else {
+                    None
+                }
+            },
+            other_network => {
+                // Default Bitcoin behavior
+                let btc_network = BNetwork::from(other_network);
+                BAddress::from_script(self, btc_network)
+                    .map(|addr| addr.to_string())
+                    .ok()
+            }
+        }
     }
 }
 
