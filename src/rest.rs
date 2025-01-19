@@ -11,11 +11,16 @@ use crate::util::{
     DEFAULT_BLOCKHASH,
 };
 
+// **Add your new imports here** (not inside the match!)
+use crate::util::script::address_str_to_script;
+use bitcoin::hashes::hex::FromHex; // provides `Vec::<u8>::from_hex(...)`
+
 #[cfg(not(feature = "liquid"))]
 use bitcoin::consensus::encode;
 
 use bitcoin::hashes::FromSliceError as HashError;
-use bitcoin::hex::{self, DisplayHex, FromHex};
+use bitcoin::hex::{self, DisplayHex};
+//        ^^^^^ `hex` is re-exported by rust-bitcoin, so you can keep it or remove it
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
 use hyperlocal::UnixServerExt;
@@ -586,7 +591,6 @@ fn handle_request(
     query: &Query,
     config: &Config,
 ) -> Result<Response<Body>, HttpError> {
-    // TODO it looks hyper does not have routing and query parsing :(
     let path: Vec<&str> = uri.path().split('/').skip(1).collect();
     let query_params = match uri.query() {
         Some(value) => form_urlencoded::parse(&value.as_bytes())
@@ -596,6 +600,7 @@ fn handle_request(
     };
 
     info!("handle {:?} {:?}", method, uri);
+    // The big match on (method, path.get(0), path.get(1), etc.) ...
     match (
         &method,
         path.get(0),
@@ -728,18 +733,47 @@ fn handle_request(
 
             json_response(prepare_txs(txs, query, config), ttl)
         }
+        // ----------------------------------------------------------
+        // The relevant arms for "address" or "scripthash" => script
+        // ----------------------------------------------------------
         (&Method::GET, Some(script_type @ &"address"), Some(script_str), None, None, None)
-        | (&Method::GET, Some(script_type @ &"scripthash"), Some(script_str), None, None, None) => {
-            let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let stats = query.stats(&script_hash[..]);
-            json_response(
-                json!({
-                    *script_type: script_str,
-                    "chain_stats": stats.0,
-                    "mempool_stats": stats.1,
-                }),
-                TTL_SHORT,
-            )
+        | (&Method::GET, Some(script_type @ &"scripthash"), Some(script_str), None, None, None) =>
+        {
+            // Because script_type is &&str, do match *script_type:
+            match *script_type {
+                "address" => {
+                    // If user gave an "address", parse with address_str_to_script
+                    let script = address_str_to_script(script_str, query.network())
+                        .map_err(|e| HttpError::from(format!("invalid address: {e}")))?;
+                    let scripthash = compute_script_hash(&script);
+                    let stats = query.stats(&scripthash[..]);
+                    json_response(
+                        json!({
+                            "address": script_str,
+                            "chain_stats": stats.0,
+                            "mempool_stats": stats.1,
+                        }),
+                        TTL_SHORT,
+                    )
+                }
+                "scripthash" => {
+                    // If user gave a "scripthash" as hex
+                    let raw_bytes = Vec::<u8>::from_hex(script_str)
+                        .map_err(|e| HttpError::from(format!("invalid hex: {e}")))?;
+                    let script = Script::from(raw_bytes);
+                    let scripthash = compute_script_hash(&script);
+                    let stats = query.stats(&scripthash[..]);
+                    json_response(
+                        json!({
+                            "scripthash": script_str,
+                            "chain_stats": stats.0,
+                            "mempool_stats": stats.1,
+                        }),
+                        TTL_SHORT,
+                    )
+                }
+                _ => Err(HttpError::from("Unknown script type".to_owned())),
+            }
         }
         (
             &Method::GET,
@@ -1188,13 +1222,15 @@ fn blocks(query: &Query, start_height: Option<usize>) -> Result<Response<Body>, 
     json_response(values, TTL_SHORT)
 }
 
-fn to_scripthash(
-    script_type: &str,
-    script_str: &str,
-    network: Network,
-) -> Result<FullHash, HttpError> {
+fn to_scripthash(script_type: &str, script_str: &str, network: Network) -> Result<FullHash, HttpError> {
     match script_type {
-        "address" => address_to_scripthash(script_str, network),
+        "address" => {
+            // Instead of address_to_scripthash(...):
+            // Just do the same "reverse parse" function from script.rs
+            let script = address_str_to_script(script_str, network)
+                .map_err(|e| HttpError::from(format!("invalid address: {e}")))?;
+            Ok(compute_script_hash(&script))
+        }
         "scripthash" => parse_scripthash(script_str),
         _ => bail!("Invalid script type".to_string()),
     }
