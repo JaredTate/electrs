@@ -25,17 +25,21 @@ impl ScriptToAsm for elements::Script {}
 pub trait ScriptToAddr {
     fn to_address_str(&self, network: Network) -> Option<String>;
 }
+
 #[cfg(not(feature = "liquid"))]
 impl ScriptToAddr for bitcoin::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
+        // Default Bitcoin-based version:
         bitcoin::Address::from_script(self, bitcoin::Network::from(network))
             .map(|s| s.to_string())
             .ok()
     }
 }
+
 #[cfg(feature = "liquid")]
 impl ScriptToAddr for elements::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
+        // Liquid-based version:
         elements_address::Address::from_script(self, None, network.address_params())
             .map(|a| a.to_string())
     }
@@ -133,4 +137,57 @@ pub fn get_innerscripts(txin: &TxIn, prevout: &TxOut) -> InnerScripts {
         redeem_script,
         witness_script,
     }
+}
+
+// -----------------------------------------------------------------------
+// ADD THIS "Option C" reverse lookup function at the bottom:
+// -----------------------------------------------------------------------
+
+/// Convert a DigiByte address string ("D...", "S...", or "dgb1...") into
+/// a standard `Script` by replacing the first character/prefix with the
+/// Bitcoin equivalent and parsing as a normal BTC address.
+///
+/// This avoids needing separate bech32/base58 crates. It's a minimal hack:
+/// - "dgb1..." -> "bc1..."
+/// - "D..." -> "1..."
+/// - "S..." -> "3..."
+/// Then we parse as Bitcoin. If none of those apply, we parse as normal BTC.
+pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script, String> {
+    use std::str::FromStr;
+    use bitcoin::Address as BAddress;
+
+    // If not DigiByte, parse normally:
+    if network != Network::DigiByte {
+        let parsed = BAddress::from_str(addr_str).map_err(|e| e.to_string())?;
+        return Ok(Script::from(parsed.assume_checked().script_pubkey().into_bytes()));
+    }
+
+    // 1) "dgb1" => replace with "bc1"
+    if addr_str.starts_with("dgb1") {
+        let replaced = addr_str.replacen("dgb1", "bc1", 1);
+        let btc_addr = BAddress::from_str(&replaced).map_err(|e| e.to_string())?;
+        return Ok(Script::from(btc_addr.assume_checked().script_pubkey().into_bytes()));
+    }
+
+    // 2) If starts with 'D', treat it as '1'
+    if let Some('D') = addr_str.chars().next() {
+        if addr_str.len() > 1 {
+            let replaced = format!("1{}", &addr_str[1..]);
+            let btc_addr = BAddress::from_str(&replaced).map_err(|e| e.to_string())?;
+            return Ok(Script::from(btc_addr.assume_checked().script_pubkey().into_bytes()));
+        }
+    }
+
+    // 3) If starts with 'S', treat it as '3'
+    if let Some('S') = addr_str.chars().next() {
+        if addr_str.len() > 1 {
+            let replaced = format!("3{}", &addr_str[1..]);
+            let btc_addr = BAddress::from_str(&replaced).map_err(|e| e.to_string())?;
+            return Ok(Script::from(btc_addr.assume_checked().script_pubkey().into_bytes()));
+        }
+    }
+
+    // 4) fallback: parse as normal BTC address
+    let parsed = BAddress::from_str(addr_str).map_err(|e| e.to_string())?;
+    Ok(Script::from(parsed.assume_checked().script_pubkey().into_bytes()))
 }
