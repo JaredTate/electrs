@@ -241,22 +241,25 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
         match bech32::decode(addr_str) {
             Ok((hrp, data)) => {
                 eprintln!("[DEBUG] Successfully decoded: hrp='{}', data_len={}", hrp, data.len());
+                eprintln!("[DEBUG] Decoded data: {:?}", data);
                 
                 if hrp.as_str() != "dgb" {
                     return Err(format!("Invalid HRP for DigiByte: {}", hrp));
                 }
                 
-                // Process the decoded data
-                if data.is_empty() {
-                    return Err("Empty bech32 data".to_string());
+                // The bitcoin bech32 decoder returns already-decoded bytes!
+                // data[0] is witness version, data[1..] is the witness program
+                if data.len() < 2 {
+                    return Err("Bech32 data too short".to_string());
                 }
                 
                 let witness_version = data[0];
-                let witness_program = convert_bits(&data[1..], 5, 8, false)
-                    .ok_or("Failed to convert witness program")?;
+                let witness_program = data[1..].to_vec();
                 
                 eprintln!("[DEBUG] Witness version: {}, program length: {}", 
                     witness_version, witness_program.len());
+                eprintln!("[DEBUG] Witness program hex: {}", 
+                    witness_program.iter().map(|b| format!("{:02x}", b)).collect::<String>());
                 
                 // Construct script
                 let script = construct_witness_script(witness_version, witness_program)?;
