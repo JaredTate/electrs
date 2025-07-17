@@ -742,11 +742,14 @@ fn handle_request(
             // Because script_type is &&str, do match *script_type:
             match *script_type {
                 "address" => {
+                    eprintln!("[DEBUG] address lookup: script_str='{}', network={:?}", script_str, query.network());
                     // If user gave an "address", parse with address_str_to_script
                     let script = address_str_to_script(script_str, query.network())
                         .map_err(|e| HttpError::from(format!("invalid address: {e}")))?;
                     let scripthash = compute_script_hash(&script);
+                    eprintln!("[DEBUG] address lookup: computed scripthash={:?}", scripthash);
                     let stats = query.stats(&scripthash[..]);
+                    eprintln!("[DEBUG] address lookup: stats={:?}", stats);
                     json_response(
                         json!({
                             "address": script_str,
@@ -903,7 +906,12 @@ fn handle_request(
             if !config.address_search {
                 return Err(HttpError::from("address search disabled".to_string()));
             }
+            eprintln!("[DEBUG] address-prefix search: prefix='{}', network={:?}", prefix, config.network_type);
+            
+            // The address_search function now handles dgb1/bc1 conversion internally
             let results = query.chain().address_search(prefix, ADDRESS_SEARCH_LIMIT);
+            
+            eprintln!("[DEBUG] address-prefix search final results: {:?}", results);
             json_response(results, TTL_SHORT)
         }
         (&Method::GET, Some(&"tx"), Some(hash), None, None, None) => {
@@ -1236,27 +1244,6 @@ fn to_scripthash(script_type: &str, script_str: &str, network: Network) -> Resul
     }
 }
 
-fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
-    #[cfg(not(feature = "liquid"))]
-    let addr = address::Address::from_str(addr)?;
-    #[cfg(feature = "liquid")]
-    let addr = address::Address::parse_with_params(addr, network.address_params())?;
-
-    #[cfg(not(feature = "liquid"))]
-    let is_expected_net = addr.is_valid_for_network(network.into());
-
-    #[cfg(feature = "liquid")]
-    let is_expected_net = addr.params == network.address_params();
-
-    if !is_expected_net {
-        bail!(HttpError::from("Address on invalid network".to_string()))
-    }
-
-    #[cfg(not(feature = "liquid"))]
-    let addr = addr.assume_checked();
-
-    Ok(compute_script_hash(&addr.script_pubkey()))
-}
 
 fn parse_scripthash(scripthash: &str) -> Result<FullHash, HttpError> {
     FullHash::from_hex(scripthash).map_err(|_| HttpError::from("Invalid scripthash".to_string()))

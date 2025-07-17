@@ -739,12 +739,53 @@ impl ChainQuery {
 
     pub fn address_search(&self, prefix: &str, limit: usize) -> Vec<String> {
         let _timer_scan = self.start_timer("address_search");
-        self.store
-            .history_db
-            .iter_scan(&addr_search_filter(prefix))
-            .take(limit)
-            .map(|row| std::str::from_utf8(&row.key[1..]).unwrap().to_string())
-            .collect()
+        
+        // For DigiByte network with dgb1 prefix, also search for bc1 prefix
+        if self.network == Network::DigiByte && prefix.starts_with("dgb1") {
+            let bc1_prefix = prefix.replacen("dgb1", "bc1", 1);
+            eprintln!("[DEBUG] address_search: searching for both '{}' and '{}'", prefix, bc1_prefix);
+            
+            // Search for both prefixes
+            let mut results = vec![];
+            
+            // Search with original dgb1 prefix
+            results.extend(
+                self.store
+                    .history_db
+                    .iter_scan(&addr_search_filter(prefix))
+                    .take(limit)
+                    .map(|row| std::str::from_utf8(&row.key[1..]).unwrap().to_string())
+            );
+            
+            // Search with bc1 prefix and convert results to dgb1
+            results.extend(
+                self.store
+                    .history_db
+                    .iter_scan(&addr_search_filter(&bc1_prefix))
+                    .take(limit)
+                    .map(|row| {
+                        let addr = std::str::from_utf8(&row.key[1..]).unwrap().to_string();
+                        if addr.starts_with("bc1") {
+                            addr.replacen("bc1", "dgb1", 1)
+                        } else {
+                            addr
+                        }
+                    })
+            );
+            
+            // Deduplicate and limit results
+            results.sort();
+            results.dedup();
+            results.truncate(limit);
+            results
+        } else {
+            self.store
+                .history_db
+                .iter_scan(&addr_search_filter(prefix))
+                .take(limit)
+                .map(|row| std::str::from_utf8(&row.key[1..]).unwrap().to_string())
+                .collect()
+        }
     }
 
     fn header_by_hash(&self, hash: &BlockHash) -> Option<HeaderEntry> {
@@ -1152,7 +1193,11 @@ fn index_transaction(
 }
 
 fn addr_search_row(spk: &Script, network: Network) -> Option<DBRow> {
-    spk.to_address_str(network).map(|address| DBRow {
+    let addr_opt = spk.to_address_str(network);
+    if let Some(ref address) = addr_opt {
+        eprintln!("[DEBUG] addr_search_row: network={:?}, script={:?}, address='{}'", network, spk, address);
+    }
+    addr_opt.map(|address| DBRow {
         key: [b"a", address.as_bytes()].concat(),
         value: vec![],
     })

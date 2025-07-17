@@ -197,7 +197,6 @@ impl From<Network> for BNetwork {
             Network::Testnet => BNetwork::Testnet,
             Network::Regtest => BNetwork::Regtest,
             Network::Signet => BNetwork::Signet,
-            _ => panic!("unknown network {:?}", network),
         }
     }
 }

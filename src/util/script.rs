@@ -6,8 +6,6 @@ use elements::address as elements_address;
 use crate::chain::{script, Network, Script, TxIn, TxOut};
 use script::Instruction::PushBytes;
 use bitcoin::{
-    base58, // needed for decode_check, encode_check
-    Address as BAddress,
     network::Network as BNetwork,
 };
 
@@ -83,8 +81,11 @@ impl ScriptToAddr for Script {
                         Ok(addr) => {
                             // For SegWit addresses, replace "bc1" prefix with "dgb1"
                             let s = addr.to_string();
+                            eprintln!("[DEBUG] to_address_str (DigiByte SegWit): btc_addr='{}', script={:?}", s, self);
                             if s.starts_with("bc1") {
-                                Some(s.replacen("bc1", "dgb1", 1))
+                                let dgb_addr = s.replacen("bc1", "dgb1", 1);
+                                eprintln!("[DEBUG] to_address_str (DigiByte SegWit): converted to dgb_addr='{}'", dgb_addr);
+                                Some(dgb_addr)
                             } else {
                                 Some(s)
                             }
@@ -164,27 +165,34 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
     use bitcoin::address::NetworkUnchecked; // older 0.32 style
     use std::str::FromStr;
 
+    eprintln!("[DEBUG] address_str_to_script: addr_str='{}', network={:?}", addr_str, network);
+
     // 1) If not DigiByte => parse as normal BTC (unchecked => checked => script)
     if network != Network::DigiByte {
         let parsed = bitcoin::Address::<NetworkUnchecked>::from_str(addr_str)
             .map_err(|e| format!("BTC parse error: {e}"))?;
         let checked = parsed.assume_checked();
+        eprintln!("[DEBUG] Non-DigiByte address parsed successfully");
         return Ok(Script::from(checked.script_pubkey().into_bytes()));
     }
 
     // 2) If it starts with "dgb1", do "bc1" replacement -> parse as BTC bech32
     if addr_str.starts_with("dgb1") {
         let replaced = addr_str.replacen("dgb1", "bc1", 1);
+        eprintln!("[DEBUG] DigiByte bech32 address: replaced '{}' -> '{}'", addr_str, replaced);
         let parsed = bitcoin::Address::<NetworkUnchecked>::from_str(&replaced)
             .map_err(|e| format!("Bech32 parse error: {e}"))?;
         let checked = parsed.assume_checked();
-        return Ok(Script::from(checked.script_pubkey().into_bytes()));
+        let script = Script::from(checked.script_pubkey().into_bytes());
+        eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
+        return Ok(script);
     }
 
     // 3) Try base58 decode for legacy
     match bitcoin::base58::decode_check(addr_str) {
         Ok(mut raw) => {
             if !raw.is_empty() {
+                eprintln!("[DEBUG] DigiByte legacy address: raw[0]={}", raw[0]);
                 // If first byte=30 => rewrite to 0 (BTC P2PKH)
                 if raw[0] == 30 {
                     raw[0] = 0;
@@ -197,19 +205,24 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
 
                 // re-encode as normal BTC base58
                 let btc_str = bitcoin::base58::encode_check(&raw);
+                eprintln!("[DEBUG] DigiByte legacy address: converted '{}' -> '{}'", addr_str, btc_str);
                 // parse as normal BTC
                 if let Ok(parsed_u) = bitcoin::Address::<NetworkUnchecked>::from_str(&btc_str) {
                     let checked = parsed_u.assume_checked();
-                    return Ok(Script::from(checked.script_pubkey().into_bytes()));
+                    let script = Script::from(checked.script_pubkey().into_bytes());
+                    eprintln!("[DEBUG] DigiByte legacy address parsed successfully, script: {:?}", script);
+                    return Ok(script);
                 }
             }
         }
-        Err(_e) => {
+        Err(e) => {
+            eprintln!("[DEBUG] DigiByte address base58 decode failed: {:?}", e);
             // If base58 decode fails, we just skip to fallback parse below
         }
     }
 
     // 4) fallback => parse as normal BTC
+    eprintln!("[DEBUG] DigiByte address: trying fallback parse for '{}'", addr_str);
     let parsed = bitcoin::Address::<NetworkUnchecked>::from_str(addr_str)
         .map_err(|e| format!("Fallback parse error: {e}"))?;
     let checked = parsed.assume_checked();
