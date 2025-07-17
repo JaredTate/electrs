@@ -148,6 +148,37 @@ pub fn get_innerscripts(txin: &TxIn, prevout: &TxOut) -> InnerScripts {
     }
 }
 
+// Helper function to convert between bit groups
+fn convert_bits(data: &[u8], from_bits: u32, to_bits: u32, pad: bool) -> Option<Vec<u8>> {
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    let mut ret = Vec::new();
+    let maxv = (1 << to_bits) - 1;
+    let max_acc = (1 << (from_bits + to_bits - 1)) - 1;
+    
+    for &value in data {
+        if (value as u32) >> from_bits != 0 {
+            return None;
+        }
+        acc = ((acc << from_bits) | (value as u32)) & max_acc;
+        bits += from_bits;
+        while bits >= to_bits {
+            bits -= to_bits;
+            ret.push(((acc >> bits) & maxv) as u8);
+        }
+    }
+    
+    if pad {
+        if bits > 0 {
+            ret.push(((acc << (to_bits - bits)) & maxv) as u8);
+        }
+    } else if bits >= from_bits || ((acc << (to_bits - bits)) & maxv) != 0 {
+        return None;
+    }
+    
+    Some(ret)
+}
+
 // -------------------------------------------------------------------
 // "Reverse" parse: DGB address -> Script by base58 or bech32 prefix swap
 //
@@ -176,73 +207,59 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
         return Ok(Script::from(checked.script_pubkey().into_bytes()));
     }
 
-    // 2) If it starts with "dgb1", manually decode the bech32 and construct the script
+    // 2) If it starts with "dgb1", decode the bech32 and construct script
     if addr_str.starts_with("dgb1") {
         eprintln!("[DEBUG] DigiByte bech32 address: {}", addr_str);
         
-        // Manual bech32 decode for dgb1 addresses
+        // Manual bech32 decode
         use bitcoin::bech32;
         
         match bech32::decode(addr_str) {
             Ok((hrp, data)) => {
-                eprintln!("[DEBUG] Decoded bech32: hrp='{}'", hrp);
+                eprintln!("[DEBUG] Manual decode: hrp='{}', data_len={}", hrp, data.len());
                 
                 if hrp.as_str() != "dgb" {
                     return Err(format!("Invalid HRP for DigiByte: {}", hrp));
                 }
                 
-                if data.is_empty() {
-                    return Err("Empty bech32 data".to_string());
+                if data.len() < 2 {
+                    return Err("Bech32 data too short".to_string());
                 }
                 
-                // The first byte is the witness version
+                // Extract witness version and convert the program
                 let witness_version = data[0];
+                eprintln!("[DEBUG] Witness version from data[0]: {}", witness_version);
                 
-                // Convert data from 5-bit to 8-bit manually
-                let mut result = Vec::new();
-                let mut accumulator = 0u32;
-                let mut bits = 0;
+                // Convert witness program from 5-bit groups to bytes
+                // This is what bitcoin does internally
+                let converted = convert_bits(&data[1..], 5, 8, false);
                 
-                for value in &data[1..] {
-                    accumulator = (accumulator << 5) | (*value as u32);
-                    bits += 5;
-                    
-                    while bits >= 8 {
-                        bits -= 8;
-                        result.push((accumulator >> bits) as u8);
-                        accumulator &= (1 << bits) - 1;
+                match converted {
+                    Some(witness_program) => {
+                        eprintln!("[DEBUG] Converted witness program length: {}", witness_program.len());
+                        
+                        let script = if witness_version == 0 {
+                            if witness_program.len() == 20 {
+                                Script::from([vec![0x00, 0x14], witness_program].concat())
+                            } else if witness_program.len() == 32 {
+                                Script::from([vec![0x00, 0x20], witness_program].concat())
+                            } else {
+                                return Err(format!("Invalid witness v0 program length: {}", witness_program.len()));
+                            }
+                        } else if witness_version <= 16 {
+                            let op = if witness_version == 1 { 0x51 } else { 0x50 + witness_version };
+                            Script::from([vec![op, witness_program.len() as u8], witness_program].concat())
+                        } else {
+                            return Err(format!("Invalid witness version: {}", witness_version));
+                        };
+                        
+                        eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
+                        return Ok(script);
+                    }
+                    None => {
+                        return Err("Failed to convert witness program".to_string());
                     }
                 }
-                
-                // Ensure no excess bits
-                if bits >= 5 || accumulator != 0 {
-                    return Err("Invalid padding in bech32 data".to_string());
-                }
-                
-                let witness_program = result;
-                eprintln!("[DEBUG] Witness version: {}, program length: {}", witness_version, witness_program.len());
-                
-                // Construct the script based on witness version and program length
-                let script = if witness_version == 0 {
-                    if witness_program.len() == 20 {
-                        // P2WPKH: OP_0 + 20 bytes
-                        Script::from([vec![0x00, 0x14], witness_program].concat())
-                    } else if witness_program.len() == 32 {
-                        // P2WSH: OP_0 + 32 bytes  
-                        Script::from([vec![0x00, 0x20], witness_program].concat())
-                    } else {
-                        return Err(format!("Invalid witness v0 program length: {}", witness_program.len()));
-                    }
-                } else if witness_version <= 16 {
-                    // Future witness versions: OP_N + push
-                    let op = if witness_version == 1 { 0x51 } else { 0x50 + witness_version };
-                    Script::from([vec![op, witness_program.len() as u8], witness_program].concat())
-                } else {
-                    return Err(format!("Invalid witness version: {}", witness_version));
-                };
-                
-                eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
-                return Ok(script);
             }
             Err(e) => {
                 eprintln!("[DEBUG] Failed to decode dgb1 address: {:?}", e);
