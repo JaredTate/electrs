@@ -176,16 +176,79 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
         return Ok(Script::from(checked.script_pubkey().into_bytes()));
     }
 
-    // 2) If it starts with "dgb1", do "bc1" replacement -> parse as BTC bech32
+    // 2) If it starts with "dgb1", manually decode the bech32 and construct the script
     if addr_str.starts_with("dgb1") {
-        let replaced = addr_str.replacen("dgb1", "bc1", 1);
-        eprintln!("[DEBUG] DigiByte bech32 address: replaced '{}' -> '{}'", addr_str, replaced);
-        let parsed = bitcoin::Address::<NetworkUnchecked>::from_str(&replaced)
-            .map_err(|e| format!("Bech32 parse error: {e}"))?;
-        let checked = parsed.assume_checked();
-        let script = Script::from(checked.script_pubkey().into_bytes());
-        eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
-        return Ok(script);
+        eprintln!("[DEBUG] DigiByte bech32 address: {}", addr_str);
+        
+        // Manual bech32 decode for dgb1 addresses
+        use bitcoin::bech32;
+        
+        match bech32::decode(addr_str) {
+            Ok((hrp, data)) => {
+                eprintln!("[DEBUG] Decoded bech32: hrp='{}'", hrp);
+                
+                if hrp.as_str() != "dgb" {
+                    return Err(format!("Invalid HRP for DigiByte: {}", hrp));
+                }
+                
+                if data.is_empty() {
+                    return Err("Empty bech32 data".to_string());
+                }
+                
+                // The first byte is the witness version
+                let witness_version = data[0];
+                
+                // Convert data from 5-bit to 8-bit manually
+                let mut result = Vec::new();
+                let mut accumulator = 0u32;
+                let mut bits = 0;
+                
+                for value in &data[1..] {
+                    accumulator = (accumulator << 5) | (*value as u32);
+                    bits += 5;
+                    
+                    while bits >= 8 {
+                        bits -= 8;
+                        result.push((accumulator >> bits) as u8);
+                        accumulator &= (1 << bits) - 1;
+                    }
+                }
+                
+                // Ensure no excess bits
+                if bits >= 5 || accumulator != 0 {
+                    return Err("Invalid padding in bech32 data".to_string());
+                }
+                
+                let witness_program = result;
+                eprintln!("[DEBUG] Witness version: {}, program length: {}", witness_version, witness_program.len());
+                
+                // Construct the script based on witness version and program length
+                let script = if witness_version == 0 {
+                    if witness_program.len() == 20 {
+                        // P2WPKH: OP_0 + 20 bytes
+                        Script::from([vec![0x00, 0x14], witness_program].concat())
+                    } else if witness_program.len() == 32 {
+                        // P2WSH: OP_0 + 32 bytes  
+                        Script::from([vec![0x00, 0x20], witness_program].concat())
+                    } else {
+                        return Err(format!("Invalid witness v0 program length: {}", witness_program.len()));
+                    }
+                } else if witness_version <= 16 {
+                    // Future witness versions: OP_N + push
+                    let op = if witness_version == 1 { 0x51 } else { 0x50 + witness_version };
+                    Script::from([vec![op, witness_program.len() as u8], witness_program].concat())
+                } else {
+                    return Err(format!("Invalid witness version: {}", witness_version));
+                };
+                
+                eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
+                return Ok(script);
+            }
+            Err(e) => {
+                eprintln!("[DEBUG] Failed to decode dgb1 address: {:?}", e);
+                return Err(format!("Invalid dgb1 address: {e}"));
+            }
+        }
     }
 
     // 3) Try base58 decode for legacy
