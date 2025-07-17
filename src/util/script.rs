@@ -229,105 +229,70 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
         return Ok(Script::from(checked.script_pubkey().into_bytes()));
     }
 
-    // 2) If it starts with "dgb1", use a direct approach without checksum validation
+    // 2) If it starts with "dgb1", decode it properly
     if addr_str.starts_with("dgb1") {
         eprintln!("[DEBUG] DigiByte bech32 address: {}", addr_str);
         
-        // Let's use the bech32 crate directly but work around the checksum issue
-        use bitcoin::bech32;
+        // The bitcoin crate's bech32 module seems to be giving us unexpected data
+        // Let's do a fully manual decode
         
-        // Try to parse as bech32 - this might fail due to checksum
-        // But let's see what error we get
-        match bech32::decode(addr_str) {
-            Ok((hrp, data)) => {
-                eprintln!("[DEBUG] Successfully decoded: hrp='{}', data_len={}", hrp, data.len());
-                eprintln!("[DEBUG] First few bytes of decoded data: {:?}", &data[..data.len().min(10)]);
-                
-                if hrp.as_str() != "dgb" {
-                    return Err(format!("Invalid HRP for DigiByte: {}", hrp));
-                }
-                
-                // Check what format the data is in
-                // If data_len is 20 or 32, it might be just the witness program without version
-                // If data_len is 21 or 33, it includes the version byte
-                
-                let (witness_version, witness_program) = if data.len() == 20 || data.len() == 32 {
-                    // Data is just the witness program, version 0 implied
-                    eprintln!("[DEBUG] Data appears to be witness program only (no version byte)");
-                    (0u8, data.to_vec())
-                } else if data.len() >= 2 {
-                    // First byte is version, rest is program
-                    eprintln!("[DEBUG] Data includes version byte");
-                    (data[0], data[1..].to_vec())
-                } else {
-                    return Err("Bech32 data too short".to_string());
-                };
-                
-                eprintln!("[DEBUG] Witness version: {}, program length: {}", 
-                    witness_version, witness_program.len());
-                eprintln!("[DEBUG] Witness program hex: {}", 
-                    witness_program.iter().map(|b| format!("{:02x}", b)).collect::<String>());
-                
-                // Construct script
-                let script = construct_witness_script(witness_version, witness_program)?;
-                eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
-                return Ok(script);
-            }
-            Err(e) => {
-                eprintln!("[DEBUG] Bech32 decode error: {:?}", e);
-                
-                // If it's a checksum error, let's try to decode without validation
-                // Parse the HRP and data manually
-                let pos = addr_str.rfind('1').ok_or("No separator '1' found")?;
-                if pos < 1 || pos + 7 > addr_str.len() {
-                    return Err("Invalid bech32 format".to_string());
-                }
-                
-                let hrp_str = &addr_str[..pos];
-                if hrp_str != "dgb" {
-                    return Err(format!("Invalid HRP: expected 'dgb', got '{}'", hrp_str));
-                }
-                
-                let data_part = &addr_str[pos + 1..];
-                eprintln!("[DEBUG] Manual parse: HRP='{}', data_part='{}'", hrp_str, data_part);
-                
-                // Decode the data part
-                const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-                let mut values = Vec::new();
-                
-                for ch in data_part.chars() {
-                    let ch_byte = ch as u8;
-                    if let Some(val) = CHARSET.iter().position(|&c| c == ch_byte) {
-                        values.push(val as u8);
-                    } else {
-                        return Err(format!("Invalid character in bech32: '{}'", ch));
-                    }
-                }
-                
-                if values.len() < 7 {
-                    return Err("Bech32 data too short".to_string());
-                }
-                
-                // Remove checksum (last 6 values)
-                let data_values = &values[..values.len() - 6];
-                
-                if data_values.is_empty() {
-                    return Err("Empty witness data".to_string());
-                }
-                
-                let witness_version = data_values[0];
-                let witness_program = convert_bits(&data_values[1..], 5, 8, false)
-                    .ok_or("Failed to convert witness program")?;
-                
-                eprintln!("[DEBUG] Manual decode: witness version: {}, program length: {}", 
-                    witness_version, witness_program.len());
-                
-                // Construct script
-                let script = construct_witness_script(witness_version, witness_program)?;
-                eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
-                return Ok(script);
+        // Find the '1' separator
+        let pos = match addr_str.rfind('1') {
+            Some(p) if p >= 3 => p,  // Must have at least "dgb" before the '1'
+            _ => return Err("Invalid bech32 format: no valid separator".to_string()),
+        };
+        
+        let hrp = &addr_str[..pos];
+        let data_part = &addr_str[pos + 1..];
+        
+        if hrp != "dgb" {
+            return Err(format!("Invalid HRP: expected 'dgb', got '{}'", hrp));
+        }
+        
+        eprintln!("[DEBUG] HRP: '{}', data part: '{}'", hrp, data_part);
+        
+        // Decode bech32 characters to 5-bit values
+        const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut values = Vec::new();
+        
+        for ch in data_part.chars() {
+            if let Some(val) = CHARSET.iter().position(|&c| c == ch as u8) {
+                values.push(val as u8);
+            } else {
+                return Err(format!("Invalid character in bech32: '{}'", ch));
             }
         }
+        
+        eprintln!("[DEBUG] Decoded {} 5-bit values", values.len());
+        
+        if values.len() < 7 { // Need at least 1 byte data + 6 checksum
+            return Err("Bech32 data too short".to_string());
+        }
+        
+        // Remove checksum (last 6 values)
+        let data_values = &values[..values.len() - 6];
+        eprintln!("[DEBUG] Data values (excluding checksum): {:?}", &data_values[..data_values.len().min(10)]);
+        
+        if data_values.is_empty() {
+            return Err("Empty witness data".to_string());
+        }
+        
+        // First value is witness version
+        let witness_version = data_values[0];
+        
+        // Convert the rest from 5-bit to 8-bit
+        let witness_program = convert_bits(&data_values[1..], 5, 8, false)
+            .ok_or("Failed to convert witness program")?;
+        
+        eprintln!("[DEBUG] Witness version: {}, program length: {}", 
+            witness_version, witness_program.len());
+        eprintln!("[DEBUG] Witness program hex: {}", 
+            witness_program.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        
+        // Construct script
+        let script = construct_witness_script(witness_version, witness_program)?;
+        eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
+        return Ok(script);
     }
 
     // 3) Try base58 decode for legacy
