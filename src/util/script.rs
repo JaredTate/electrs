@@ -241,20 +241,27 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
         match bech32::decode(addr_str) {
             Ok((hrp, data)) => {
                 eprintln!("[DEBUG] Successfully decoded: hrp='{}', data_len={}", hrp, data.len());
-                eprintln!("[DEBUG] Decoded data: {:?}", data);
+                eprintln!("[DEBUG] First few bytes of decoded data: {:?}", &data[..data.len().min(10)]);
                 
                 if hrp.as_str() != "dgb" {
                     return Err(format!("Invalid HRP for DigiByte: {}", hrp));
                 }
                 
-                // The bitcoin bech32 decoder returns already-decoded bytes!
-                // data[0] is witness version, data[1..] is the witness program
-                if data.len() < 2 {
-                    return Err("Bech32 data too short".to_string());
-                }
+                // Check what format the data is in
+                // If data_len is 20 or 32, it might be just the witness program without version
+                // If data_len is 21 or 33, it includes the version byte
                 
-                let witness_version = data[0];
-                let witness_program = data[1..].to_vec();
+                let (witness_version, witness_program) = if data.len() == 20 || data.len() == 32 {
+                    // Data is just the witness program, version 0 implied
+                    eprintln!("[DEBUG] Data appears to be witness program only (no version byte)");
+                    (0u8, data.to_vec())
+                } else if data.len() >= 2 {
+                    // First byte is version, rest is program
+                    eprintln!("[DEBUG] Data includes version byte");
+                    (data[0], data[1..].to_vec())
+                } else {
+                    return Err("Bech32 data too short".to_string());
+                };
                 
                 eprintln!("[DEBUG] Witness version: {}, program length: {}", 
                     witness_version, witness_program.len());
