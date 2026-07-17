@@ -53,6 +53,7 @@ impl ScriptToAddr for elements::Script {
 // -------------------------------------------------------------------
 // DigiByte-specific script -> DGB address (same as your original code)
 // -------------------------------------------------------------------
+#[cfg(not(feature = "liquid"))]
 impl ScriptToAddr for Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
         match network {

@@ -3,6 +3,8 @@ use crate::chain::{
     TxOut, Txid,
 };
 use crate::config::Config;
+#[cfg(not(feature = "liquid"))]
+use crate::digidollar::{analyze_transaction, parse_script, DigiDollarOutputInfo, DigiDollarTxInfo};
 use crate::errors;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::{
@@ -132,6 +134,9 @@ struct TransactionValue {
     fee: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<TransactionStatus>,
+    #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digidollar: Option<DigiDollarTxInfo>,
 }
 
 impl TransactionValue {
@@ -161,13 +166,16 @@ impl TransactionValue {
         let weight = tx.weight();
         #[cfg(not(feature = "liquid"))] // rust-bitcoin has a wrapper Weight type
         let weight = weight.to_wu();
+        #[cfg(not(feature = "liquid"))]
+        let version = tx.version.0 as u32;
+        #[cfg(feature = "liquid")]
+        let version = tx.version as u32;
+        #[cfg(not(feature = "liquid"))]
+        let digidollar = analyze_transaction(version, &tx.output);
 
         TransactionValue {
             txid: tx.compute_txid(),
-            #[cfg(not(feature = "liquid"))]
-            version: tx.version.0 as u32,
-            #[cfg(feature = "liquid")]
-            version: tx.version as u32,
+            version,
             locktime: tx.lock_time.to_consensus_u32(),
             vin: vins,
             vout: vouts,
@@ -175,6 +183,8 @@ impl TransactionValue {
             weight: weight as u64,
             fee,
             status: Some(TransactionStatus::from(blockid)),
+            #[cfg(not(feature = "liquid"))]
+            digidollar,
         }
     }
 }
@@ -266,6 +276,10 @@ struct TxOutValue {
     scriptpubkey_address: Option<String>,
 
     #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digidollar: Option<DigiDollarOutputInfo>,
+
+    #[cfg(not(feature = "liquid"))]
     value: u64,
 
     #[cfg(feature = "liquid")]
@@ -304,6 +318,8 @@ impl TxOutValue {
         let script = &txout.script_pubkey;
         let script_asm = script.to_asm();
         let script_addr = script.to_address_str(config.network_type);
+        #[cfg(not(feature = "liquid"))]
+        let digidollar = parse_script(script);
 
         // TODO should the following something to put inside rust-elements lib?
         let script_type = if is_fee {
@@ -338,6 +354,8 @@ impl TxOutValue {
             scriptpubkey_asm: script_asm,
             scriptpubkey_address: script_addr,
             scriptpubkey_type: script_type.to_string(),
+            #[cfg(not(feature = "liquid"))]
+            digidollar,
             value,
             #[cfg(feature = "liquid")]
             valuecommitment: txout.value.commitment(),

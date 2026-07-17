@@ -19,6 +19,8 @@ extern crate lazy_static;
 pub mod chain;
 pub mod config;
 pub mod daemon;
+#[cfg(not(feature = "liquid"))]
+pub mod digidollar;
 pub mod electrum;
 pub mod errors;
 pub mod metrics;
