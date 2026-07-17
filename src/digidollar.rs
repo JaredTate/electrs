@@ -1,4 +1,4 @@
-use crate::chain::{Script, TxOut};
+use crate::chain::{Script, Transaction, TxOut};
 use bitcoin::hex::DisplayHex;
 
 const OP_0: u8 = 0x00;
@@ -137,6 +137,10 @@ pub fn analyze_transaction(version: u32, outputs: &[TxOut]) -> Option<DigiDollar
         metadata,
         oracle_bundles,
     })
+}
+
+pub fn transaction_has_digidollar_activity(tx: &Transaction) -> bool {
+    analyze_transaction(tx.version.0 as u32, &tx.output).is_some()
 }
 
 fn parse_dd_metadata(items: &[ScriptItem]) -> DigiDollarOutputInfo {
@@ -473,8 +477,8 @@ fn invalid_output(kind: &str, error: impl Into<String>) -> DigiDollarOutputInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::Script;
-    use bitcoin::Amount;
+    use crate::chain::{OutPoint, Script, Sequence, Transaction, TxIn};
+    use bitcoin::{absolute::LockTime, transaction::Version, Amount, Witness};
 
     const OP_RETURN: u8 = 0x6a;
     const OP_ORACLE: u8 = 0xbf;
@@ -597,6 +601,26 @@ mod tests {
         assert_eq!(info.metadata.len(), 1);
         assert_eq!(info.metadata[0].vout, Some(0));
         assert_eq!(info.metadata[0].amounts_cents, Some(vec![100, 250]));
+    }
+
+    #[test]
+    fn detects_digidollar_transaction_activity() {
+        let tx = Transaction {
+            version: Version(0x0200_0770),
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::default(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: transfer_script(),
+            }],
+        };
+
+        assert!(transaction_has_digidollar_activity(&tx));
     }
 
     #[test]

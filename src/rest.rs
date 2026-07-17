@@ -4,7 +4,10 @@ use crate::chain::{
 };
 use crate::config::Config;
 #[cfg(not(feature = "liquid"))]
-use crate::digidollar::{analyze_transaction, parse_script, DigiDollarOutputInfo, DigiDollarTxInfo};
+use crate::digidollar::{
+    analyze_transaction, parse_script, transaction_has_digidollar_activity, DigiDollarOutputInfo,
+    DigiDollarTxInfo,
+};
 use crate::errors;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::{
@@ -68,6 +71,9 @@ struct BlockValue {
     version: u32,
     timestamp: u32,
     tx_count: u32,
+    #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digidollar_tx_count: Option<u32>,
     size: u32,
     weight: u64,
     merkle_root: TxMerkleNode,
@@ -99,6 +105,8 @@ impl BlockValue {
             version: header.version,
             timestamp: header.time,
             tx_count: blockhm.meta.tx_count,
+            #[cfg(not(feature = "liquid"))]
+            digidollar_tx_count: None,
             size: blockhm.meta.size,
             weight: blockhm.meta.weight as u64,
             merkle_root: header.merkle_root,
@@ -120,6 +128,22 @@ impl BlockValue {
             ext: Some(header.ext.clone()),
         }
     }
+}
+
+#[cfg(not(feature = "liquid"))]
+fn count_block_digidollar_txs(query: &Query, block_hash: &BlockHash) -> Option<u32> {
+    let txids = query.chain().get_block_txids(block_hash)?;
+    Some(
+        txids
+            .iter()
+            .filter(|txid| {
+                query
+                    .chain()
+                    .lookup_txn(txid, Some(block_hash))
+                    .map_or(false, |tx| transaction_has_digidollar_activity(&tx))
+            })
+            .count() as u32,
+    )
 }
 
 #[derive(Serialize)]
@@ -658,7 +682,12 @@ fn handle_request(
                 .chain()
                 .get_block_with_meta(&hash)
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
-            let block_value = BlockValue::new(blockhm);
+            #[allow(unused_mut)]
+            let mut block_value = BlockValue::new(blockhm);
+            #[cfg(not(feature = "liquid"))]
+            {
+                block_value.digidollar_tx_count = count_block_digidollar_txs(&query, &hash);
+            }
             json_response(block_value, TTL_LONG)
         }
         (&Method::GET, Some(&"block"), Some(hash), Some(&"status"), None, None) => {
@@ -1225,14 +1254,19 @@ fn blocks(query: &Query, start_height: Option<usize>) -> Result<Response<Body>, 
 
     let zero = [0u8; 32];
     for _ in 0..BLOCK_LIMIT {
+        let block_hash = current_hash;
         let blockhm = query
             .chain()
-            .get_block_with_meta(&current_hash)
+            .get_block_with_meta(&block_hash)
             .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
         current_hash = blockhm.header_entry.header().prev_blockhash;
 
         #[allow(unused_mut)]
         let mut value = BlockValue::new(blockhm);
+        #[cfg(not(feature = "liquid"))]
+        {
+            value.digidollar_tx_count = count_block_digidollar_txs(query, &block_hash);
+        }
 
         #[cfg(feature = "liquid")]
         {
