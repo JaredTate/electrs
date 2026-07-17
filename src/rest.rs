@@ -5,8 +5,8 @@ use crate::chain::{
 use crate::config::Config;
 #[cfg(not(feature = "liquid"))]
 use crate::digidollar::{
-    analyze_transaction, parse_script, transaction_has_digidollar_activity, DigiDollarOutputInfo,
-    DigiDollarTxInfo,
+    analyze_transaction, analyze_transaction_outputs, parse_script,
+    transaction_has_digidollar_activity, DigiDollarOutputInfo, DigiDollarTxInfo,
 };
 use crate::errors;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
@@ -171,6 +171,12 @@ impl TransactionValue {
         config: &Config,
     ) -> Self {
         let prevouts = extract_tx_prevouts(&tx, &txos, true);
+        #[cfg(not(feature = "liquid"))]
+        let version = tx.version.0 as u32;
+        #[cfg(feature = "liquid")]
+        let version = tx.version as u32;
+        #[cfg(not(feature = "liquid"))]
+        let digidollar_outputs = analyze_transaction_outputs(version, &tx.output);
         let vins: Vec<TxInValue> = tx
             .input
             .iter()
@@ -182,7 +188,21 @@ impl TransactionValue {
         let vouts: Vec<TxOutValue> = tx
             .output
             .iter()
-            .map(|txout| TxOutValue::new(txout, config))
+            .enumerate()
+            .map(|(index, txout)| {
+                #[cfg(not(feature = "liquid"))]
+                {
+                    TxOutValue::new_with_digidollar(
+                        txout,
+                        config,
+                        digidollar_outputs.get(index).cloned().flatten(),
+                    )
+                }
+                #[cfg(feature = "liquid")]
+                {
+                    TxOutValue::new(txout, config)
+                }
+            })
             .collect();
 
         let fee = get_tx_fee(&tx, &prevouts, config.network_type);
@@ -190,10 +210,6 @@ impl TransactionValue {
         let weight = tx.weight();
         #[cfg(not(feature = "liquid"))] // rust-bitcoin has a wrapper Weight type
         let weight = weight.to_wu();
-        #[cfg(not(feature = "liquid"))]
-        let version = tx.version.0 as u32;
-        #[cfg(feature = "liquid")]
-        let version = tx.version as u32;
         #[cfg(not(feature = "liquid"))]
         let digidollar = analyze_transaction(version, &tx.output);
 
@@ -330,20 +346,30 @@ struct TxOutValue {
 impl TxOutValue {
     fn new(txout: &TxOut, config: &Config) -> Self {
         #[cfg(not(feature = "liquid"))]
-        let value = txout.value.to_sat();
+        {
+            Self::new_with_digidollar(txout, config, parse_script(&txout.script_pubkey))
+        }
         #[cfg(feature = "liquid")]
-        let value = txout.value.explicit();
+        {
+            Self::new_with_digidollar(txout, config)
+        }
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    fn new_with_digidollar(
+        txout: &TxOut,
+        config: &Config,
+        digidollar: Option<DigiDollarOutputInfo>,
+    ) -> Self {
+        #[cfg(not(feature = "liquid"))]
+        let value = txout.value.to_sat();
 
         #[cfg(not(feature = "liquid"))]
         let is_fee = false;
-        #[cfg(feature = "liquid")]
-        let is_fee = txout.is_fee();
 
         let script = &txout.script_pubkey;
         let script_asm = script.to_asm();
         let script_addr = script.to_address_str(config.network_type);
-        #[cfg(not(feature = "liquid"))]
-        let digidollar = parse_script(script);
 
         // TODO should the following something to put inside rust-elements lib?
         let script_type = if is_fee {
@@ -388,6 +414,54 @@ impl TxOutValue {
             #[cfg(feature = "liquid")]
             assetcommitment: txout.asset.commitment(),
             #[cfg(feature = "liquid")]
+            pegout,
+        }
+    }
+
+    #[cfg(feature = "liquid")]
+    fn new_with_digidollar(txout: &TxOut, config: &Config) -> Self {
+        let value = txout.value.explicit();
+        let is_fee = txout.is_fee();
+        let script = &txout.script_pubkey;
+        let script_asm = script.to_asm();
+        let script_addr = script.to_address_str(config.network_type);
+
+        // TODO should the following something to put inside rust-elements lib?
+        let script_type = if is_fee {
+            "fee"
+        } else if script.is_empty() {
+            "empty"
+        } else if script.is_op_return() {
+            "op_return"
+        } else if script.is_p2pk() {
+            "p2pk"
+        } else if script.is_p2pkh() {
+            "p2pkh"
+        } else if script.is_p2sh() {
+            "p2sh"
+        } else if script.is_p2wpkh() {
+            "v0_p2wpkh"
+        } else if script.is_p2wsh() {
+            "v0_p2wsh"
+        } else if script.is_p2tr() {
+            "v1_p2tr"
+        } else if script.is_op_return() {
+            "provably_unspendable"
+        } else {
+            "unknown"
+        };
+
+        let pegout = PegoutValue::from_txout(txout, config.network_type, config.parent_network);
+
+        TxOutValue {
+            scriptpubkey: script.clone(),
+            scriptpubkey_asm: script_asm,
+            scriptpubkey_address: script_addr,
+            scriptpubkey_type: script_type.to_string(),
+            value,
+            valuecommitment: txout.value.commitment(),
+            asset: txout.asset.explicit(),
+            assetcommitment: txout.asset.commitment(),
             pegout,
         }
     }

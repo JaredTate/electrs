@@ -210,9 +210,10 @@ fn construct_witness_script(witness_version: u8, witness_program: Vec<u8>) -> Re
 //
 //  1) If not DigiByte => parse as normal BTC
 //  2) If bech32 "dgb1..." => verify checksum and construct witness script
-//  3) Otherwise, try base58 decode_check(...). If first byte=30 => set to 0, if 63 => set to 5
-//  4) Re-encode as BTC base58 => parse as normal BTC => get script
-//  5) fallback => parse as normal BTC
+//  3) If Base58Check DD DigiDollar P2TR, convert to the matching P2TR script
+//  4) Otherwise, try base58 decode_check(...). If first byte=30 => set to 0, if 63 => set to 5
+//  5) Re-encode as BTC base58 => parse as normal BTC => get script
+//  6) fallback => parse as normal BTC
 //
 // This avoids "legacy address base58 prefix" error for addresses like DSdh4r... .
 //
@@ -250,9 +251,13 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
         return construct_witness_script(witness_version, witness_program);
     }
 
-    // 3) Try base58 decode for legacy
+    // 3) Try base58 decode for DigiDollar and legacy addresses.
     match bitcoin::base58::decode_check(addr_str) {
         Ok(mut raw) => {
+            if raw.len() == 34 && raw[0] == 0x52 && raw[1] == 0x85 {
+                return construct_witness_script(1, raw.split_off(2));
+            }
+
             if !raw.is_empty() {
                 // If first byte=30 => rewrite to 0 (BTC P2PKH)
                 if raw[0] == 30 {
@@ -347,6 +352,18 @@ mod tests {
             Network::DigiByte
         )
         .is_err());
+    }
+
+    #[test]
+    fn digidollar_address_parses_to_p2tr_script() {
+        assert_eq!(
+            address_str_to_script(
+                "DD1NQeCkofg1AyWvCWdki4N44Dihox91Xw8aYSotx7bb2cNaf6Aa",
+                Network::DigiByte
+            )
+            .unwrap(),
+            script("51201111111111111111111111111111111111111111111111111111111111111111")
+        );
     }
 
     #[test]

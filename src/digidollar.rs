@@ -51,6 +51,8 @@ pub struct DigiDollarOutputInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amounts_cents: Option<Vec<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub dd_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_height: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_tier: Option<i64>,
@@ -137,6 +139,59 @@ pub fn analyze_transaction(version: u32, outputs: &[TxOut]) -> Option<DigiDollar
         metadata,
         oracle_bundles,
     })
+}
+
+pub fn analyze_transaction_outputs(version: u32, outputs: &[TxOut]) -> Vec<Option<DigiDollarOutputInfo>> {
+    let mut parsed: Vec<Option<DigiDollarOutputInfo>> = outputs
+        .iter()
+        .map(|output| parse_script(&output.script_pubkey))
+        .collect();
+
+    let tx_marker = (version & DD_VERSION_MASK) == (DD_TX_VERSION & DD_VERSION_MASK);
+    let type_code = ((version & DD_TYPE_MASK) >> 24) as u8;
+    if !tx_marker || !matches!(type_code, 1..=3) {
+        return parsed;
+    }
+
+    let metadata = parsed
+        .iter()
+        .filter_map(|item| item.as_ref())
+        .find(|info| info.valid && info.type_code == Some(type_code));
+
+    let Some(metadata) = metadata else {
+        return parsed;
+    };
+
+    let amounts = match type_code {
+        1 | 3 => metadata.amount_cents.map(|amount| vec![amount]),
+        2 => metadata.amounts_cents.clone(),
+        _ => None,
+    };
+    let Some(amounts) = amounts else {
+        return parsed;
+    };
+
+    let dd_output_indexes: Vec<usize> = outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, output)| is_dd_token_output(output).then_some(index))
+        .collect();
+
+    if dd_output_indexes.len() != amounts.len() {
+        return parsed;
+    }
+
+    for (index, amount) in dd_output_indexes.into_iter().zip(amounts.into_iter()) {
+        let mut output = base_output("token_output", true);
+        output.vout = Some(index as u32);
+        output.tx_type = tx_type_name(type_code).map(str::to_owned);
+        output.type_code = Some(type_code);
+        output.amount_cents = Some(amount);
+        output.dd_address = digidollar_address_from_script(&outputs[index].script_pubkey);
+        parsed[index] = Some(output);
+    }
+
+    parsed
 }
 
 pub fn transaction_has_digidollar_activity(tx: &Transaction) -> bool {
@@ -317,6 +372,27 @@ fn parse_oracle_bundle(items: &[ScriptItem]) -> DigiDollarOutputInfo {
     output
 }
 
+pub fn digidollar_address_from_script(script: &Script) -> Option<String> {
+    let program = p2tr_program(script)?;
+    let mut payload = Vec::with_capacity(34);
+    payload.extend_from_slice(&[0x52, 0x85]);
+    payload.extend_from_slice(program);
+    Some(bitcoin::base58::encode_check(&payload))
+}
+
+fn is_dd_token_output(output: &TxOut) -> bool {
+    output.value.to_sat() == 0 && p2tr_program(&output.script_pubkey).is_some()
+}
+
+fn p2tr_program(script: &Script) -> Option<&[u8]> {
+    let bytes = script.as_bytes();
+    if bytes.len() == 34 && bytes[0] == OP_1 && bytes[1] == 32 {
+        Some(&bytes[2..34])
+    } else {
+        None
+    }
+}
+
 fn read_items_after_op_return(bytes: &[u8]) -> Result<Vec<ScriptItem>, String> {
     if bytes.first().copied() != Some(OP_RETURN) {
         return Err("script is not OP_RETURN".to_string());
@@ -454,6 +530,7 @@ fn base_output(kind: &str, valid: bool) -> DigiDollarOutputInfo {
         type_code: None,
         amount_cents: None,
         amounts_cents: None,
+        dd_address: None,
         lock_height: None,
         lock_tier: None,
         owner_xonly_pubkey: None,
@@ -529,6 +606,12 @@ mod tests {
         script(bytes)
     }
 
+    fn p2tr_script(byte: u8) -> Script {
+        let mut bytes = vec![OP_1, 32];
+        bytes.extend_from_slice(&[byte; 32]);
+        script(bytes)
+    }
+
     #[test]
     fn parses_mint_metadata() {
         let mut bytes = vec![OP_RETURN];
@@ -601,6 +684,80 @@ mod tests {
         assert_eq!(info.metadata.len(), 1);
         assert_eq!(info.metadata[0].vout, Some(0));
         assert_eq!(info.metadata[0].amounts_cents, Some(vec![100, 250]));
+    }
+
+    #[test]
+    fn encodes_digidollar_address_from_p2tr_output() {
+        assert_eq!(
+            digidollar_address_from_script(&p2tr_script(0x11)).as_deref(),
+            Some("DD1NQeCkofg1AyWvCWdki4N44Dihox91Xw8aYSotx7bb2cNaf6Aa")
+        );
+    }
+
+    #[test]
+    fn maps_transfer_amounts_to_zero_value_p2tr_outputs() {
+        let outputs = vec![
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: p2tr_script(0x11),
+            },
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: p2tr_script(0x22),
+            },
+            TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: p2tr_script(0x33),
+            },
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: transfer_script(),
+            },
+        ];
+
+        let parsed = analyze_transaction_outputs(0x0200_0770, &outputs);
+        assert_eq!(parsed[0].as_ref().map(|info| info.kind.as_str()), Some("token_output"));
+        assert_eq!(parsed[0].as_ref().and_then(|info| info.amount_cents), Some(100));
+        assert_eq!(
+            parsed[0].as_ref().and_then(|info| info.dd_address.as_deref()),
+            Some("DD1NQeCkofg1AyWvCWdki4N44Dihox91Xw8aYSotx7bb2cNaf6Aa")
+        );
+        assert_eq!(parsed[1].as_ref().and_then(|info| info.amount_cents), Some(250));
+        assert_eq!(
+            parsed[1].as_ref().and_then(|info| info.dd_address.as_deref()),
+            Some("DD1Vvb241PdnKaqZFEojEzKRi1o1f8PLFzB3tCHYQnEvPSfaLNaf")
+        );
+        assert!(parsed[2].is_none());
+        assert_eq!(parsed[3].as_ref().map(|info| info.kind.as_str()), Some("transfer_metadata"));
+    }
+
+    #[test]
+    fn does_not_partially_map_transfer_amount_mismatches() {
+        let outputs = vec![
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: p2tr_script(0x11),
+            },
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: p2tr_script(0x22),
+            },
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: {
+                    let mut bytes = vec![OP_RETURN];
+                    bytes.extend(push(b"DD"));
+                    bytes.extend(script_num(2));
+                    bytes.extend(script_num(100));
+                    script(bytes)
+                },
+            },
+        ];
+
+        let parsed = analyze_transaction_outputs(0x0200_0770, &outputs);
+        assert!(parsed[0].is_none());
+        assert!(parsed[1].is_none());
+        assert_eq!(parsed[2].as_ref().map(|info| info.kind.as_str()), Some("transfer_metadata"));
     }
 
     #[test]
