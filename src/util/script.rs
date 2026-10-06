@@ -6,8 +6,10 @@ use elements::address as elements_address;
 use crate::chain::{script, Network, Script, TxIn, TxOut};
 use script::Instruction::PushBytes;
 use bitcoin::{
+    bech32::{self, segwit, Hrp},
     network::Network as BNetwork,
 };
+use std::convert::TryFrom;
 
 pub struct InnerScripts {
     pub redeem_script: Option<Script>,
@@ -51,6 +53,7 @@ impl ScriptToAddr for elements::Script {
 // -------------------------------------------------------------------
 // DigiByte-specific script -> DGB address (same as your original code)
 // -------------------------------------------------------------------
+#[cfg(not(feature = "liquid"))]
 impl ScriptToAddr for Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
         match network {
@@ -74,24 +77,8 @@ impl ScriptToAddr for Script {
                         .copied()
                         .collect::<Vec<_>>()
                     ))
-                } else if self.is_p2wpkh() || self.is_p2wsh() {
-                    // For SegWit addresses, generate a Bitcoin address first
-                    let btc_network = BNetwork::Bitcoin;
-                    match bitcoin::Address::from_script(self, btc_network) {
-                        Ok(addr) => {
-                            // For SegWit addresses, replace "bc1" prefix with "dgb1"
-                            let s = addr.to_string();
-                            eprintln!("[DEBUG] to_address_str (DigiByte SegWit): btc_addr='{}', script={:?}", s, self);
-                            if s.starts_with("bc1") {
-                                let dgb_addr = s.replacen("bc1", "dgb1", 1);
-                                eprintln!("[DEBUG] to_address_str (DigiByte SegWit): converted to dgb_addr='{}'", dgb_addr);
-                                Some(dgb_addr)
-                            } else {
-                                Some(s)
-                            }
-                        }
-                        Err(_) => None,
-                    }
+                } else if let Some((witness_version, witness_program)) = witness_program_from_script(self) {
+                    digibyte_witness_address(witness_version, witness_program)
                 } else {
                     None
                 }
@@ -104,6 +91,48 @@ impl ScriptToAddr for Script {
                     .ok()
             }
         }
+    }
+}
+
+fn digibyte_hrp() -> Hrp {
+    Hrp::parse_unchecked("dgb")
+}
+
+fn digibyte_witness_address(witness_version: u8, witness_program: &[u8]) -> Option<String> {
+    let witness_version = bech32::Fe32::try_from(witness_version).ok()?;
+    segwit::encode(digibyte_hrp(), witness_version, witness_program).ok()
+}
+
+fn witness_program_from_script(script: &Script) -> Option<(u8, &[u8])> {
+    let bytes = script.as_bytes();
+    if bytes.len() < 4 {
+        return None;
+    }
+
+    let witness_version = match bytes[0] {
+        0x00 => 0,
+        0x51..=0x60 => bytes[0] - 0x50,
+        _ => return None,
+    };
+
+    let program_len = bytes[1] as usize;
+    if bytes.len() != program_len + 2 {
+        return None;
+    }
+
+    let program = &bytes[2..];
+    if is_valid_witness_program(witness_version, program.len()) {
+        Some((witness_version, program))
+    } else {
+        None
+    }
+}
+
+fn is_valid_witness_program(witness_version: u8, program_len: usize) -> bool {
+    if witness_version == 0 {
+        program_len == 20 || program_len == 32
+    } else {
+        witness_version <= 16 && (2..=40).contains(&program_len)
     }
 }
 
@@ -160,55 +189,31 @@ fn construct_witness_script(witness_version: u8, witness_program: Vec<u8>) -> Re
         } else {
             return Err(format!("Invalid witness v0 program length: {}", witness_program.len()));
         }
-    } else if witness_version <= 16 {
+    } else if witness_version <= 16 && (2..=40).contains(&witness_program.len()) {
         // Future witness versions: OP_N + push
         let op = if witness_version == 1 { 0x51 } else { 0x50 + witness_version };
         Script::from([vec![op, witness_program.len() as u8], witness_program].concat())
+    } else if witness_version <= 16 {
+        return Err(format!(
+            "Invalid witness v{} program length: {}",
+            witness_version,
+            witness_program.len()
+        ));
     } else {
         return Err(format!("Invalid witness version: {}", witness_version));
     };
     Ok(script)
 }
 
-// Helper function to convert between bit groups
-fn convert_bits(data: &[u8], from_bits: u32, to_bits: u32, pad: bool) -> Option<Vec<u8>> {
-    let mut acc = 0u32;
-    let mut bits = 0u32;
-    let mut ret = Vec::new();
-    let maxv = (1 << to_bits) - 1;
-    let max_acc = (1 << (from_bits + to_bits - 1)) - 1;
-    
-    for &value in data {
-        if (value as u32) >> from_bits != 0 {
-            return None;
-        }
-        acc = ((acc << from_bits) | (value as u32)) & max_acc;
-        bits += from_bits;
-        while bits >= to_bits {
-            bits -= to_bits;
-            ret.push(((acc >> bits) & maxv) as u8);
-        }
-    }
-    
-    if pad {
-        if bits > 0 {
-            ret.push(((acc << (to_bits - bits)) & maxv) as u8);
-        }
-    } else if bits >= from_bits || ((acc << (to_bits - bits)) & maxv) != 0 {
-        return None;
-    }
-    
-    Some(ret)
-}
-
 // -------------------------------------------------------------------
-// "Reverse" parse: DGB address -> Script by base58 or bech32 prefix swap
+// "Reverse" parse: DGB address -> Script by base58 or checked bech32
 //
 //  1) If not DigiByte => parse as normal BTC
-//  2) If bech32 "dgb1..." => replace w/"bc1", parse as BTC
-//  3) Otherwise, try base58 decode_check(...). If first byte=30 => set to 0, if 63 => set to 5
-//  4) Re-encode as BTC base58 => parse as normal BTC => get script
-//  5) fallback => parse as normal BTC
+//  2) If bech32 "dgb1..." => verify checksum and construct witness script
+//  3) If Base58Check DD DigiDollar P2TR, convert to the matching P2TR script
+//  4) Otherwise, try base58 decode_check(...). If first byte=30 => set to 0, if 63 => set to 5
+//  5) Re-encode as BTC base58 => parse as normal BTC => get script
+//  6) fallback => parse as normal BTC
 //
 // This avoids "legacy address base58 prefix" error for addresses like DSdh4r... .
 //
@@ -218,88 +223,42 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
     use bitcoin::address::NetworkUnchecked; // older 0.32 style
     use std::str::FromStr;
 
-    eprintln!("[DEBUG] address_str_to_script: addr_str='{}', network={:?}", addr_str, network);
-
     // 1) If not DigiByte => parse as normal BTC (unchecked => checked => script)
     if network != Network::DigiByte {
         let parsed = bitcoin::Address::<NetworkUnchecked>::from_str(addr_str)
             .map_err(|e| format!("BTC parse error: {e}"))?;
         let checked = parsed.assume_checked();
-        eprintln!("[DEBUG] Non-DigiByte address parsed successfully");
         return Ok(Script::from(checked.script_pubkey().into_bytes()));
     }
 
-    // 2) If it starts with "dgb1", decode it properly
-    if addr_str.starts_with("dgb1") {
-        eprintln!("[DEBUG] DigiByte bech32 address: {}", addr_str);
-        
-        // The bitcoin crate's bech32 module seems to be giving us unexpected data
-        // Let's do a fully manual decode
-        
-        // Find the '1' separator
-        let pos = match addr_str.rfind('1') {
-            Some(p) if p >= 3 => p,  // Must have at least "dgb" before the '1'
-            _ => return Err("Invalid bech32 format: no valid separator".to_string()),
-        };
-        
-        let hrp = &addr_str[..pos];
-        let data_part = &addr_str[pos + 1..];
-        
-        if hrp != "dgb" {
+    // 2) If it starts with "dgb1", decode it with checksum verification.
+    if addr_str.to_ascii_lowercase().starts_with("dgb1") {
+        let (hrp, witness_version, witness_program) = segwit::decode(addr_str)
+            .map_err(|e| format!("Invalid DigiByte bech32 address: {e}"))?;
+        if hrp != digibyte_hrp() {
             return Err(format!("Invalid HRP: expected 'dgb', got '{}'", hrp));
         }
-        
-        eprintln!("[DEBUG] HRP: '{}', data part: '{}'", hrp, data_part);
-        
-        // Decode bech32 characters to 5-bit values
-        const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-        let mut values = Vec::new();
-        
-        for ch in data_part.chars() {
-            if let Some(val) = CHARSET.iter().position(|&c| c == ch as u8) {
-                values.push(val as u8);
-            } else {
-                return Err(format!("Invalid character in bech32: '{}'", ch));
-            }
+
+        let witness_version = witness_version.to_u8();
+        if !is_valid_witness_program(witness_version, witness_program.len()) {
+            return Err(format!(
+                "Invalid witness v{} program length: {}",
+                witness_version,
+                witness_program.len()
+            ));
         }
-        
-        eprintln!("[DEBUG] Decoded {} 5-bit values", values.len());
-        
-        if values.len() < 7 { // Need at least 1 byte data + 6 checksum
-            return Err("Bech32 data too short".to_string());
-        }
-        
-        // Remove checksum (last 6 values)
-        let data_values = &values[..values.len() - 6];
-        eprintln!("[DEBUG] Data values (excluding checksum): {:?}", &data_values[..data_values.len().min(10)]);
-        
-        if data_values.is_empty() {
-            return Err("Empty witness data".to_string());
-        }
-        
-        // First value is witness version
-        let witness_version = data_values[0];
-        
-        // Convert the rest from 5-bit to 8-bit
-        let witness_program = convert_bits(&data_values[1..], 5, 8, false)
-            .ok_or("Failed to convert witness program")?;
-        
-        eprintln!("[DEBUG] Witness version: {}, program length: {}", 
-            witness_version, witness_program.len());
-        eprintln!("[DEBUG] Witness program hex: {}", 
-            witness_program.iter().map(|b| format!("{:02x}", b)).collect::<String>());
-        
-        // Construct script
-        let script = construct_witness_script(witness_version, witness_program)?;
-        eprintln!("[DEBUG] DigiByte bech32 address parsed successfully, script: {:?}", script);
-        return Ok(script);
+
+        return construct_witness_script(witness_version, witness_program);
     }
 
-    // 3) Try base58 decode for legacy
+    // 3) Try base58 decode for DigiDollar and legacy addresses.
     match bitcoin::base58::decode_check(addr_str) {
         Ok(mut raw) => {
+            if raw.len() == 34 && raw[0] == 0x52 && raw[1] == 0x85 {
+                return construct_witness_script(1, raw.split_off(2));
+            }
+
             if !raw.is_empty() {
-                eprintln!("[DEBUG] DigiByte legacy address: raw[0]={}", raw[0]);
                 // If first byte=30 => rewrite to 0 (BTC P2PKH)
                 if raw[0] == 30 {
                     raw[0] = 0;
@@ -312,26 +271,114 @@ pub fn address_str_to_script(addr_str: &str, network: Network) -> Result<Script,
 
                 // re-encode as normal BTC base58
                 let btc_str = bitcoin::base58::encode_check(&raw);
-                eprintln!("[DEBUG] DigiByte legacy address: converted '{}' -> '{}'", addr_str, btc_str);
                 // parse as normal BTC
                 if let Ok(parsed_u) = bitcoin::Address::<NetworkUnchecked>::from_str(&btc_str) {
                     let checked = parsed_u.assume_checked();
                     let script = Script::from(checked.script_pubkey().into_bytes());
-                    eprintln!("[DEBUG] DigiByte legacy address parsed successfully, script: {:?}", script);
                     return Ok(script);
                 }
             }
         }
-        Err(e) => {
-            eprintln!("[DEBUG] DigiByte address base58 decode failed: {:?}", e);
+        Err(_) => {
             // If base58 decode fails, we just skip to fallback parse below
         }
     }
 
     // 4) fallback => parse as normal BTC
-    eprintln!("[DEBUG] DigiByte address: trying fallback parse for '{}'", addr_str);
     let parsed = bitcoin::Address::<NetworkUnchecked>::from_str(addr_str)
         .map_err(|e| format!("Fallback parse error: {e}"))?;
     let checked = parsed.assume_checked();
     Ok(Script::from(checked.script_pubkey().into_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn script(hex: &str) -> Script {
+        Script::from_hex(hex).unwrap()
+    }
+
+    #[test]
+    fn digibyte_witness_v0_p2wpkh_uses_dgb_checksum() {
+        let script = script("001425321626148d3a5d2c88996b4ec7a7a7fbcbc5ad");
+
+        assert_eq!(
+            script.to_address_str(Network::DigiByte).as_deref(),
+            Some("dgb1qy5epvfs535a96tygn945a3a85lauh3ddu9v63y")
+        );
+        assert_ne!(
+            script.to_address_str(Network::DigiByte).as_deref(),
+            Some("dgb1qy5epvfs535a96tygn945a3a85lauh3ddt7gzf2")
+        );
+    }
+
+    #[test]
+    fn digibyte_witness_v0_p2wsh_uses_dgb_checksum() {
+        let script =
+            script("0020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+
+        assert_eq!(
+            script.to_address_str(Network::DigiByte).as_deref(),
+            Some("dgb1qqqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0slf0s5p")
+        );
+    }
+
+    #[test]
+    fn digibyte_witness_v1_p2tr_uses_bech32m() {
+        let script =
+            script("51201111111111111111111111111111111111111111111111111111111111111111");
+
+        assert_eq!(
+            script.to_address_str(Network::DigiByte).as_deref(),
+            Some("dgb1pzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs8lgkx2")
+        );
+    }
+
+    #[test]
+    fn digibyte_address_parse_validates_bech32_checksum() {
+        let expected = script("001425321626148d3a5d2c88996b4ec7a7a7fbcbc5ad");
+
+        assert_eq!(
+            address_str_to_script(
+                "dgb1qy5epvfs535a96tygn945a3a85lauh3ddu9v63y",
+                Network::DigiByte
+            )
+            .unwrap(),
+            expected
+        );
+        assert!(address_str_to_script(
+            "dgb1qy5epvfs535a96tygn945a3a85lauh3ddt7gzf2",
+            Network::DigiByte
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn digidollar_address_parses_to_p2tr_script() {
+        assert_eq!(
+            address_str_to_script(
+                "DD1NQeCkofg1AyWvCWdki4N44Dihox91Xw8aYSotx7bb2cNaf6Aa",
+                Network::DigiByte
+            )
+            .unwrap(),
+            script("51201111111111111111111111111111111111111111111111111111111111111111")
+        );
+    }
+
+    #[test]
+    fn digibyte_legacy_addresses_are_unchanged() {
+        assert_eq!(
+            script("76a91425321626148d3a5d2c88996b4ec7a7a7fbcbc5ad88ac")
+                .to_address_str(Network::DigiByte)
+                .as_deref(),
+            Some("D8XmYRog5MvgyfEBAv2xMVhBmXcuaVjuVh")
+        );
+        assert_eq!(
+            script("a91425321626148d3a5d2c88996b4ec7a7a7fbcbc5ad87")
+                .to_address_str(Network::DigiByte)
+                .as_deref(),
+            Some("SQgg31eBWKDbxxq2ym2UMdg9YB834eWHrw")
+        );
+    }
 }

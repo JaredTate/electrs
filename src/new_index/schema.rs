@@ -32,6 +32,7 @@ use crate::util::{
     bincode, full_hash, has_prevout, is_spendable, BlockHeaderMeta, BlockId, BlockMeta,
     BlockStatus, Bytes, HeaderEntry, HeaderList, ScriptToAddr,
 };
+use crate::util::script::address_str_to_script;
 
 use crate::new_index::db::{DBFlush, DBRow, ReverseScanIterator, ScanIterator, DB};
 use crate::new_index::fetch::{start_fetcher, BlockEntry, FetchFrom};
@@ -739,53 +740,42 @@ impl ChainQuery {
 
     pub fn address_search(&self, prefix: &str, limit: usize) -> Vec<String> {
         let _timer_scan = self.start_timer("address_search");
-        
-        // For DigiByte network with dgb1 prefix, also search for bc1 prefix
+
+        let mut scan_prefixes = vec![prefix.to_string()];
         if self.network == Network::DigiByte && prefix.starts_with("dgb1") {
-            let bc1_prefix = prefix.replacen("dgb1", "bc1", 1);
-            eprintln!("[DEBUG] address_search: searching for both '{}' and '{}'", prefix, bc1_prefix);
-            
-            // Search for both prefixes
-            let mut results = vec![];
-            
-            // Search with original dgb1 prefix
-            results.extend(
-                self.store
-                    .history_db
-                    .iter_scan(&addr_search_filter(prefix))
-                    .take(limit)
-                    .map(|row| std::str::from_utf8(&row.key[1..]).unwrap().to_string())
-            );
-            
-            // Search with bc1 prefix and convert results to dgb1
-            results.extend(
-                self.store
-                    .history_db
-                    .iter_scan(&addr_search_filter(&bc1_prefix))
-                    .take(limit)
-                    .map(|row| {
-                        let addr = std::str::from_utf8(&row.key[1..]).unwrap().to_string();
-                        if addr.starts_with("bc1") {
-                            addr.replacen("bc1", "dgb1", 1)
-                        } else {
-                            addr
-                        }
-                    })
-            );
-            
-            // Deduplicate and limit results
-            results.sort();
-            results.dedup();
-            results.truncate(limit);
-            results
-        } else {
-            self.store
-                .history_db
-                .iter_scan(&addr_search_filter(prefix))
-                .take(limit)
-                .map(|row| std::str::from_utf8(&row.key[1..]).unwrap().to_string())
-                .collect()
+            scan_prefixes.push(prefix.replacen("dgb1", "bc1", 1));
+
+            // Existing DB rows may contain dgb1 strings with the old bc1 checksum.
+            // If the caller searches into the checksum suffix, scan by the payload
+            // prefix and canonicalize the stored address before filtering.
+            if prefix.len() > 6 {
+                let payload_prefix = &prefix[..prefix.len() - 6];
+                scan_prefixes.push(payload_prefix.to_string());
+                scan_prefixes.push(payload_prefix.replacen("dgb1", "bc1", 1));
+            }
         }
+
+        scan_prefixes.sort();
+        scan_prefixes.dedup();
+
+        let scan_limit = limit.saturating_mul(100).max(limit);
+        let mut results = vec![];
+        for scan_prefix in scan_prefixes {
+            results.extend(
+                self.store
+                    .history_db
+                    .iter_scan(&addr_search_filter(&scan_prefix))
+                    .take(scan_limit)
+                    .filter_map(|row| std::str::from_utf8(&row.key[1..]).ok().map(str::to_string))
+                    .filter_map(|addr| canonical_address_for_search(&addr, self.network))
+                    .filter(|addr| addr.starts_with(prefix)),
+            );
+        }
+
+        results.sort();
+        results.dedup();
+        results.truncate(limit);
+        results
     }
 
     fn header_by_hash(&self, hash: &BlockHash) -> Option<HeaderEntry> {
@@ -1194,17 +1184,70 @@ fn index_transaction(
 
 fn addr_search_row(spk: &Script, network: Network) -> Option<DBRow> {
     let addr_opt = spk.to_address_str(network);
-    if let Some(ref address) = addr_opt {
-        eprintln!("[DEBUG] addr_search_row: network={:?}, script={:?}, address='{}'", network, spk, address);
-    }
     addr_opt.map(|address| DBRow {
         key: [b"a", address.as_bytes()].concat(),
         value: vec![],
     })
 }
 
+fn canonical_address_for_search(addr: &str, network: Network) -> Option<String> {
+    if network != Network::DigiByte {
+        return Some(addr.to_string());
+    }
+
+    if addr.starts_with("dgb1") {
+        if let Ok(script) = address_str_to_script(addr, Network::DigiByte) {
+            return script.to_address_str(Network::DigiByte);
+        }
+
+        // Compatibility for rows indexed by the previous bc1->dgb1 string swap:
+        // the payload is valid, but the checksum is still for the Bitcoin HRP.
+        let btc_addr = addr.replacen("dgb1", "bc1", 1);
+        return address_str_to_script(&btc_addr, Network::Bitcoin)
+            .ok()
+            .and_then(|script| script.to_address_str(Network::DigiByte));
+    }
+
+    if addr.starts_with("bc1") {
+        return address_str_to_script(addr, Network::Bitcoin)
+            .ok()
+            .and_then(|script| script.to_address_str(Network::DigiByte));
+    }
+
+    Some(addr.to_string())
+}
+
 fn addr_search_filter(prefix: &str) -> Bytes {
     [b"a", prefix.as_bytes()].concat()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digibyte_addr_search_row_uses_dgb_bech32_checksum() {
+        let script =
+            Script::from_hex("001425321626148d3a5d2c88996b4ec7a7a7fbcbc5ad").unwrap();
+        let row = addr_search_row(&script, Network::DigiByte).unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&row.key).unwrap(),
+            "adgb1qy5epvfs535a96tygn945a3a85lauh3ddu9v63y"
+        );
+    }
+
+    #[test]
+    fn digibyte_address_search_canonicalizes_old_prefix_swapped_rows() {
+        assert_eq!(
+            canonical_address_for_search(
+                "dgb1qy5epvfs535a96tygn945a3a85lauh3ddt7gzf2",
+                Network::DigiByte
+            )
+            .as_deref(),
+            Some("dgb1qy5epvfs535a96tygn945a3a85lauh3ddu9v63y")
+        );
+    }
 }
 
 // TODO: replace by a separate opaque type (similar to Sha256dHash, but without the "double")

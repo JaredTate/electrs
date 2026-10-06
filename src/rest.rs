@@ -3,6 +3,11 @@ use crate::chain::{
     TxOut, Txid,
 };
 use crate::config::Config;
+#[cfg(not(feature = "liquid"))]
+use crate::digidollar::{
+    analyze_transaction, analyze_transaction_outputs, parse_script,
+    transaction_has_digidollar_activity, DigiDollarOutputInfo, DigiDollarTxInfo,
+};
 use crate::errors;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
 use crate::util::{
@@ -66,6 +71,9 @@ struct BlockValue {
     version: u32,
     timestamp: u32,
     tx_count: u32,
+    #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digidollar_tx_count: Option<u32>,
     size: u32,
     weight: u64,
     merkle_root: TxMerkleNode,
@@ -97,6 +105,8 @@ impl BlockValue {
             version: header.version,
             timestamp: header.time,
             tx_count: blockhm.meta.tx_count,
+            #[cfg(not(feature = "liquid"))]
+            digidollar_tx_count: None,
             size: blockhm.meta.size,
             weight: blockhm.meta.weight as u64,
             merkle_root: header.merkle_root,
@@ -120,6 +130,22 @@ impl BlockValue {
     }
 }
 
+#[cfg(not(feature = "liquid"))]
+fn count_block_digidollar_txs(query: &Query, block_hash: &BlockHash) -> Option<u32> {
+    let txids = query.chain().get_block_txids(block_hash)?;
+    Some(
+        txids
+            .iter()
+            .filter(|txid| {
+                query
+                    .chain()
+                    .lookup_txn(txid, Some(block_hash))
+                    .map_or(false, |tx| transaction_has_digidollar_activity(&tx))
+            })
+            .count() as u32,
+    )
+}
+
 #[derive(Serialize)]
 struct TransactionValue {
     txid: Txid,
@@ -132,6 +158,9 @@ struct TransactionValue {
     fee: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<TransactionStatus>,
+    #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digidollar: Option<DigiDollarTxInfo>,
 }
 
 impl TransactionValue {
@@ -142,6 +171,12 @@ impl TransactionValue {
         config: &Config,
     ) -> Self {
         let prevouts = extract_tx_prevouts(&tx, &txos, true);
+        #[cfg(not(feature = "liquid"))]
+        let version = tx.version.0 as u32;
+        #[cfg(feature = "liquid")]
+        let version = tx.version as u32;
+        #[cfg(not(feature = "liquid"))]
+        let digidollar_outputs = analyze_transaction_outputs(version, &tx.output);
         let vins: Vec<TxInValue> = tx
             .input
             .iter()
@@ -153,7 +188,21 @@ impl TransactionValue {
         let vouts: Vec<TxOutValue> = tx
             .output
             .iter()
-            .map(|txout| TxOutValue::new(txout, config))
+            .enumerate()
+            .map(|(index, txout)| {
+                #[cfg(not(feature = "liquid"))]
+                {
+                    TxOutValue::new_with_digidollar(
+                        txout,
+                        config,
+                        digidollar_outputs.get(index).cloned().flatten(),
+                    )
+                }
+                #[cfg(feature = "liquid")]
+                {
+                    TxOutValue::new(txout, config)
+                }
+            })
             .collect();
 
         let fee = get_tx_fee(&tx, &prevouts, config.network_type);
@@ -161,13 +210,12 @@ impl TransactionValue {
         let weight = tx.weight();
         #[cfg(not(feature = "liquid"))] // rust-bitcoin has a wrapper Weight type
         let weight = weight.to_wu();
+        #[cfg(not(feature = "liquid"))]
+        let digidollar = analyze_transaction(version, &tx.output);
 
         TransactionValue {
             txid: tx.compute_txid(),
-            #[cfg(not(feature = "liquid"))]
-            version: tx.version.0 as u32,
-            #[cfg(feature = "liquid")]
-            version: tx.version as u32,
+            version,
             locktime: tx.lock_time.to_consensus_u32(),
             vin: vins,
             vout: vouts,
@@ -175,6 +223,8 @@ impl TransactionValue {
             weight: weight as u64,
             fee,
             status: Some(TransactionStatus::from(blockid)),
+            #[cfg(not(feature = "liquid"))]
+            digidollar,
         }
     }
 }
@@ -266,6 +316,10 @@ struct TxOutValue {
     scriptpubkey_address: Option<String>,
 
     #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digidollar: Option<DigiDollarOutputInfo>,
+
+    #[cfg(not(feature = "liquid"))]
     value: u64,
 
     #[cfg(feature = "liquid")]
@@ -292,14 +346,26 @@ struct TxOutValue {
 impl TxOutValue {
     fn new(txout: &TxOut, config: &Config) -> Self {
         #[cfg(not(feature = "liquid"))]
-        let value = txout.value.to_sat();
+        {
+            Self::new_with_digidollar(txout, config, parse_script(&txout.script_pubkey))
+        }
         #[cfg(feature = "liquid")]
-        let value = txout.value.explicit();
+        {
+            Self::new_with_digidollar(txout, config)
+        }
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    fn new_with_digidollar(
+        txout: &TxOut,
+        config: &Config,
+        digidollar: Option<DigiDollarOutputInfo>,
+    ) -> Self {
+        #[cfg(not(feature = "liquid"))]
+        let value = txout.value.to_sat();
 
         #[cfg(not(feature = "liquid"))]
         let is_fee = false;
-        #[cfg(feature = "liquid")]
-        let is_fee = txout.is_fee();
 
         let script = &txout.script_pubkey;
         let script_asm = script.to_asm();
@@ -338,6 +404,8 @@ impl TxOutValue {
             scriptpubkey_asm: script_asm,
             scriptpubkey_address: script_addr,
             scriptpubkey_type: script_type.to_string(),
+            #[cfg(not(feature = "liquid"))]
+            digidollar,
             value,
             #[cfg(feature = "liquid")]
             valuecommitment: txout.value.commitment(),
@@ -346,6 +414,54 @@ impl TxOutValue {
             #[cfg(feature = "liquid")]
             assetcommitment: txout.asset.commitment(),
             #[cfg(feature = "liquid")]
+            pegout,
+        }
+    }
+
+    #[cfg(feature = "liquid")]
+    fn new_with_digidollar(txout: &TxOut, config: &Config) -> Self {
+        let value = txout.value.explicit();
+        let is_fee = txout.is_fee();
+        let script = &txout.script_pubkey;
+        let script_asm = script.to_asm();
+        let script_addr = script.to_address_str(config.network_type);
+
+        // TODO should the following something to put inside rust-elements lib?
+        let script_type = if is_fee {
+            "fee"
+        } else if script.is_empty() {
+            "empty"
+        } else if script.is_op_return() {
+            "op_return"
+        } else if script.is_p2pk() {
+            "p2pk"
+        } else if script.is_p2pkh() {
+            "p2pkh"
+        } else if script.is_p2sh() {
+            "p2sh"
+        } else if script.is_p2wpkh() {
+            "v0_p2wpkh"
+        } else if script.is_p2wsh() {
+            "v0_p2wsh"
+        } else if script.is_p2tr() {
+            "v1_p2tr"
+        } else if script.is_op_return() {
+            "provably_unspendable"
+        } else {
+            "unknown"
+        };
+
+        let pegout = PegoutValue::from_txout(txout, config.network_type, config.parent_network);
+
+        TxOutValue {
+            scriptpubkey: script.clone(),
+            scriptpubkey_asm: script_asm,
+            scriptpubkey_address: script_addr,
+            scriptpubkey_type: script_type.to_string(),
+            value,
+            valuecommitment: txout.value.commitment(),
+            asset: txout.asset.explicit(),
+            assetcommitment: txout.asset.commitment(),
             pegout,
         }
     }
@@ -640,7 +756,12 @@ fn handle_request(
                 .chain()
                 .get_block_with_meta(&hash)
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
-            let block_value = BlockValue::new(blockhm);
+            #[allow(unused_mut)]
+            let mut block_value = BlockValue::new(blockhm);
+            #[cfg(not(feature = "liquid"))]
+            {
+                block_value.digidollar_tx_count = count_block_digidollar_txs(&query, &hash);
+            }
             json_response(block_value, TTL_LONG)
         }
         (&Method::GET, Some(&"block"), Some(hash), Some(&"status"), None, None) => {
@@ -1207,14 +1328,19 @@ fn blocks(query: &Query, start_height: Option<usize>) -> Result<Response<Body>, 
 
     let zero = [0u8; 32];
     for _ in 0..BLOCK_LIMIT {
+        let block_hash = current_hash;
         let blockhm = query
             .chain()
-            .get_block_with_meta(&current_hash)
+            .get_block_with_meta(&block_hash)
             .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
         current_hash = blockhm.header_entry.header().prev_blockhash;
 
         #[allow(unused_mut)]
         let mut value = BlockValue::new(blockhm);
+        #[cfg(not(feature = "liquid"))]
+        {
+            value.digidollar_tx_count = count_block_digidollar_txs(query, &block_hash);
+        }
 
         #[cfg(feature = "liquid")]
         {
