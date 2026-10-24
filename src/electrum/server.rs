@@ -8,8 +8,7 @@ use std::time::Instant;
 
 use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hex::DisplayHex;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
+use bitcoin::hashes::{sha256, Hash as _, HashEngine as _};
 use error_chain::ChainedError;
 use serde_json::{from_str, Value};
 
@@ -73,8 +72,7 @@ fn get_status_hash(txs: Vec<(Txid, Option<BlockId>)>, query: &Query) -> Option<F
     if txs.is_empty() {
         None
     } else {
-        let mut hash = FullHash::default();
-        let mut sha2 = Sha256::new();
+        let mut sha2 = sha256::Hash::engine();
         for (txid, blockid) in txs {
             let is_mempool = blockid.is_none();
             let has_unconfirmed_parents = is_mempool
@@ -84,8 +82,7 @@ fn get_status_hash(txs: Vec<(Txid, Option<BlockId>)>, query: &Query) -> Option<F
             let part = format!("{}:{}:", txid, height);
             sha2.input(part.as_bytes());
         }
-        sha2.result(&mut hash);
-        Some(hash)
+        Some(sha256::Hash::from_engine(sha2).to_byte_array())
     }
 }
 

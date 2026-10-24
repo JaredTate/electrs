@@ -3,8 +3,7 @@ use bitcoin::hex::FromHex;
 #[cfg(not(feature = "liquid"))]
 use bitcoin::merkle_tree::MerkleBlock;
 
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
+use bitcoin::hashes::{sha256, Hash as _};
 use itertools::Itertools;
 use rayon::prelude::*;
 
@@ -1248,17 +1247,28 @@ mod tests {
             Some("dgb1qy5epvfs535a96tygn945a3a85lauh3ddu9v63y")
         );
     }
+
+    // Script hashes are DB keys. The SHA256 output must never change, or the index breaks.
+    #[test]
+    fn compute_script_hash_matches_electrum_scripthash() {
+        use bitcoin::hex::DisplayHex;
+        // P2PKH for 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa (Electrum protocol docs example)
+        let script =
+            Script::from_hex("76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac").unwrap();
+        let mut hash = compute_script_hash(&script);
+        hash.reverse();
+        assert_eq!(
+            hash.to_lower_hex_string(),
+            "8b01df4e368ea28f8dc0423bcf7a4923e3a12d307c875e47a0cfbf90b5c39161"
+        );
+    }
 }
 
 // TODO: replace by a separate opaque type (similar to Sha256dHash, but without the "double")
 pub type FullHash = [u8; 32]; // serialized SHA256 result
 
 pub fn compute_script_hash(script: &Script) -> FullHash {
-    let mut hash = FullHash::default();
-    let mut sha2 = Sha256::new();
-    sha2.input(script.as_bytes());
-    sha2.result(&mut hash);
-    hash
+    sha256::Hash::hash(script.as_bytes()).to_byte_array()
 }
 
 pub fn parse_hash(hash: &FullHash) -> Sha256dHash {
